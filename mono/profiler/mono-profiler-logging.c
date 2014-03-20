@@ -1861,11 +1861,11 @@ profiler_add_heap_shot_write_job (ProfilerHeapShotWriteJob *job)
 
 //将分配的对象指针保存进heap_shot_object_buffers中。
 #define STORE_ALLOCATED_OBJECT(d,o) do {\
-	if ((d)->heap_shot_object_buffers->next_free_slot < (d)->heap_shot_object_buffers->end) {\ 
+	if ((d)->heap_shot_object_buffers->next_free_slot < (d)->heap_shot_object_buffers->end) {\
 		*((d)->heap_shot_object_buffers->next_free_slot) = (o);\
 		(d)->heap_shot_object_buffers->next_free_slot ++;\
 	} else {\
-		ProfilerHeapShotObjectBuffer *buffer = profiler_heap_shot_object_buffer_new (d);\ 
+		ProfilerHeapShotObjectBuffer *buffer = profiler_heap_shot_object_buffer_new (d);\
 		*((buffer)->next_free_slot) = (o);\
 		(buffer)->next_free_slot ++;\
 	}\
