@@ -385,6 +385,7 @@ typedef struct _ProfilerCodeChunks {
 #define PROFILER_HEAP_SHOT_HEAP_BUFFER_SIZE 4096
 #define PROFILER_HEAP_SHOT_WRITE_BUFFER_SIZE 4096
 
+//用于保存在分配回调传入的MonoObject*
 typedef struct _ProfilerHeapShotObjectBuffer {
 	struct _ProfilerHeapShotObjectBuffer *next;
 	MonoObject **next_free_slot;
@@ -405,6 +406,7 @@ typedef struct _ProfilerHeapShotHeapBuffers {
 	ProfilerHeapShotHeapBuffer *buffers;
 	ProfilerHeapShotHeapBuffer *last;
 	ProfilerHeapShotHeapBuffer *current;
+	//指向当前块current的第一个空闲槽位
 	MonoObject **first_free_slot;
 } ProfilerHeapShotHeapBuffers;
 
@@ -414,6 +416,7 @@ typedef struct _ProfilerHeapShotWriteBuffer {
 	gpointer buffer [PROFILER_HEAP_SHOT_WRITE_BUFFER_SIZE];
 } ProfilerHeapShotWriteBuffer;
 
+//用于存储每个类的总览信息
 typedef struct _ProfilerHeapShotClassSummary {
 	struct {
 		guint32 instances;
@@ -425,6 +428,7 @@ typedef struct _ProfilerHeapShotClassSummary {
 	} unreachable;
 } ProfilerHeapShotClassSummary;
 
+//HeapShot总览信息，里面有每个类的实例总览
 typedef struct _ProfilerHeapShotCollectionSummary {
 	ProfilerHeapShotClassSummary *per_class_data;
 	guint32 capacity;
@@ -433,18 +437,27 @@ typedef struct _ProfilerHeapShotCollectionSummary {
 typedef struct _ProfilerHeapShotWriteJob {
 	struct _ProfilerHeapShotWriteJob *next;
 	struct _ProfilerHeapShotWriteJob *next_unwritten;
+
+	//指向buffers中第一个Buffer的第一个槽位
 	gpointer *start;
+	//指向buffers中当前使用Buffer的槽位
 	gpointer *cursor;
+	//指向buffers中最后一个Buffer的最后一个槽位
 	gpointer *end;
 	ProfilerHeapShotWriteBuffer *buffers;
 	ProfilerHeapShotWriteBuffer **last_next;
 	guint32 full_buffers;
+
+	//是否进行HeapShot标记
 	gboolean heap_shot_was_requested;
+
+	//开始与结束时间戳
 	guint64 start_counter;
 	guint64 start_time;
 	guint64 end_counter;
 	guint64 end_time;
 	guint32 collection;
+
 	ProfilerHeapShotCollectionSummary summary;
 	gboolean dump_heap_data;
 } ProfilerHeapShotWriteJob;
@@ -955,6 +968,10 @@ struct _MonoProfiler {
 	*/
 
 	ProfilerHeapShotWriteJob *heap_shot_write_jobs;
+
+	//Profiler的总堆记录缓存，每次GC的时候会更新一次
+	//此缓存在每次Alloc回调时增加对象，每次GC的时候会
+	//收集每个线程分配的对象，剔除已释放的对象
 	ProfilerHeapShotHeapBuffers heap;
 	
 	int command_port;
@@ -1231,24 +1248,19 @@ class_id_mapping_element_new (MonoClass *klass) {
 static void
 class_id_mapping_element_build_layout_bitmap (MonoClass *klass, ClassIdMappingElement *klass_id) {
 	MonoClass *parent_class = mono_class_get_parent (klass);
+
+	//引用字段数量
 	int number_of_reference_fields = 0;
 	int max_offset_of_reference_fields = 0;
 	ClassIdMappingElement *parent_id;
 	gpointer iter;
 	MonoClassField *field;
-	
-#if (DEBUG_CLASS_BITMAPS)
-	printf ("class_id_mapping_element_build_layout_bitmap: building layout for class %s.%s: ", mono_class_get_namespace (klass), mono_class_get_name (klass));
-#endif
-	
+		
 	if (parent_class != NULL) {
 		parent_id = class_id_mapping_element_get (parent_class);
 		g_assert (parent_id != NULL);
 		
 		if (parent_id->data.layout.slots == CLASS_LAYOUT_NOT_INITIALIZED) {
-#if (DEBUG_CLASS_BITMAPS)
-			printf ("[recursively building bitmap for father class]\n");
-#endif
 			class_id_mapping_element_build_layout_bitmap (parent_class, parent_id);
 		}
 	} else {
@@ -1258,11 +1270,11 @@ class_id_mapping_element_build_layout_bitmap (MonoClass *klass, ClassIdMappingEl
 	iter = NULL;
 	while ((field = mono_class_get_fields (klass, &iter)) != NULL) {
 		MonoType* field_type = mono_field_get_type (field);
-		// For now, skip static fields
+		//跳过静态字段
 		if (mono_field_get_flags (field) & 0x0010 /*FIELD_ATTRIBUTE_STATIC*/)
 			continue;
 		
-		//若为引用类型
+		//若为引用字段
 		if (MONO_TYPE_IS_REFERENCE (field_type)) {
 			int field_offset = mono_field_get_offset (field) - sizeof (MonoObject);
 			if (field_offset > max_offset_of_reference_fields) {
@@ -1277,15 +1289,8 @@ class_id_mapping_element_build_layout_bitmap (MonoClass *klass, ClassIdMappingEl
 				
 				if (field_id->data.layout.slots == CLASS_LAYOUT_NOT_INITIALIZED) {
 					if (field_id != klass_id) {
-#if (DEBUG_CLASS_BITMAPS)
-						printf ("[recursively building bitmap for field %s]\n", mono_field_get_name (field));
-#endif
 						class_id_mapping_element_build_layout_bitmap (field_class, field_id);
 					} else {
-#if (DEBUG_CLASS_BITMAPS)
-						printf ("[breaking recursive bitmap build for field %s]", mono_field_get_name (field));
-						
-#endif
 						klass_id->data.bitmap.compact = 0;
 						klass_id->data.layout.slots = 0;
 						klass_id->data.layout.references = 0;
@@ -1306,27 +1311,16 @@ class_id_mapping_element_build_layout_bitmap (MonoClass *klass, ClassIdMappingEl
 		}
 	}
 	
-#if (DEBUG_CLASS_BITMAPS)
-	printf ("[allocating bitmap for class %s.%s (references %d, max offset %d, slots %d)]", mono_class_get_namespace (klass), mono_class_get_name (klass), number_of_reference_fields, max_offset_of_reference_fields, (int)(max_offset_of_reference_fields / sizeof (gpointer)) + 1);
-#endif
+
 	if ((number_of_reference_fields == 0) && ((parent_id == NULL) || (parent_id->data.layout.references == 0))) {
-#if (DEBUG_CLASS_BITMAPS)
-		printf ("[no references at all]");
-#endif
 		klass_id->data.bitmap.compact = 0;
 		klass_id->data.layout.slots = 0;
 		klass_id->data.layout.references = 0;
 	} else {
 		if ((parent_id != NULL) && (parent_id->data.layout.references > 0)) {
-#if (DEBUG_CLASS_BITMAPS)
-			printf ("[parent %s.%s has %d references in %d slots]", mono_class_get_namespace (parent_class), mono_class_get_name (parent_class), parent_id->data.layout.references, parent_id->data.layout.slots);
-#endif
 			klass_id->data.layout.slots = parent_id->data.layout.slots;
 			klass_id->data.layout.references = parent_id->data.layout.references;
 		} else {
-#if (DEBUG_CLASS_BITMAPS)
-			printf ("[no references from parent]");
-#endif
 			klass_id->data.layout.slots = 0;
 			klass_id->data.layout.references = 0;
 		}
@@ -1334,9 +1328,6 @@ class_id_mapping_element_build_layout_bitmap (MonoClass *klass, ClassIdMappingEl
 		if (number_of_reference_fields > 0) {
 			klass_id->data.layout.slots += ((max_offset_of_reference_fields / sizeof (gpointer)) + 1);
 			klass_id->data.layout.references += number_of_reference_fields;
-#if (DEBUG_CLASS_BITMAPS)
-			printf ("[adding data, going to %d references in %d slots]", klass_id->data.layout.references, klass_id->data.layout.slots);
-#endif
 		}
 		
 		if (klass_id->data.layout.slots <= CLASS_LAYOUT_PACKED_BITMAP_SIZE) {
@@ -1661,9 +1652,6 @@ static void
 profiler_heap_shot_object_buffers_destroy (ProfilerHeapShotObjectBuffer *buffer) {
 	while (buffer != NULL) {
 		ProfilerHeapShotObjectBuffer *next = buffer->next;
-#if DEBUG_HEAP_PROFILER
-		printf ("profiler_heap_shot_object_buffers_destroy: destroyed buffer %p (%p-%p)\n", buffer, & (buffer->buffer [0]), buffer->end);
-#endif
 		g_free (buffer);
 		buffer = next;
 	}
@@ -1671,6 +1659,8 @@ profiler_heap_shot_object_buffers_destroy (ProfilerHeapShotObjectBuffer *buffer)
 
 static ProfilerHeapShotObjectBuffer*
 profiler_heap_shot_object_buffer_new (ProfilerPerThreadData *data) {
+
+	//初始化对象记录缓存块，将此块挂接在逐线程数据区对象缓存链表头。
 	ProfilerHeapShotObjectBuffer *buffer = NULL;
 	ProfilerHeapShotObjectBuffer *result = g_new (ProfilerHeapShotObjectBuffer, 1);
 	result->next_free_slot = & (result->buffer [0]);
@@ -1821,9 +1811,6 @@ profiler_free_heap_shot_write_jobs (void) {
 	
 	if (current_job != NULL) {
 		while (current_job->next_unwritten != NULL) {
-#if DEBUG_HEAP_PROFILER
-			printf ("profiler_free_heap_shot_write_jobs: job %p must not be freed\n", current_job);
-#endif
 			current_job = current_job->next_unwritten;
 		}
 		
@@ -1857,13 +1844,11 @@ profiler_destroy_heap_shot_write_jobs (void) {
 }
 
 static void
-profiler_add_heap_shot_write_job (ProfilerHeapShotWriteJob *job) {
+profiler_add_heap_shot_write_job (ProfilerHeapShotWriteJob *job) 
+{
 	job->next = profiler->heap_shot_write_jobs;
 	job->next_unwritten = job->next;
 	profiler->heap_shot_write_jobs = job;
-#if DEBUG_HEAP_PROFILER
-	printf ("profiler_add_heap_shot_write_job: added job %p\n", job);
-#endif
 }
 
 #if DEBUG_HEAP_PROFILER
@@ -1874,15 +1859,13 @@ profiler_add_heap_shot_write_job (ProfilerHeapShotWriteJob *job) {
 #define STORE_ALLOCATED_OBJECT_MESSAGE2(d,o)
 #endif
 
-//
+//将分配的对象指针保存进heap_shot_object_buffers中。
 #define STORE_ALLOCATED_OBJECT(d,o) do {\
-	if ((d)->heap_shot_object_buffers->next_free_slot < (d)->heap_shot_object_buffers->end) {\
-		STORE_ALLOCATED_OBJECT_MESSAGE1 ((d), (o));\
+	if ((d)->heap_shot_object_buffers->next_free_slot < (d)->heap_shot_object_buffers->end) {\ 
 		*((d)->heap_shot_object_buffers->next_free_slot) = (o);\
 		(d)->heap_shot_object_buffers->next_free_slot ++;\
 	} else {\
-		ProfilerHeapShotObjectBuffer *buffer = profiler_heap_shot_object_buffer_new (d);\
-		STORE_ALLOCATED_OBJECT_MESSAGE2 ((d), (o));\
+		ProfilerHeapShotObjectBuffer *buffer = profiler_heap_shot_object_buffer_new (d);\ 
 		*((buffer)->next_free_slot) = (o);\
 		(buffer)->next_free_slot ++;\
 	}\
@@ -2403,7 +2386,6 @@ write_directives_block (gboolean start) {
 #endif
 #define WRITE_HEAP_SHOT_JOB_VALUE(j,v) do {\
 	if ((j)->cursor < (j)->end) {\
-		WRITE_HEAP_SHOT_JOB_VALUE_MESSAGE ((v), ((j)->cursor));\
 		*((j)->cursor) = (v);\
 		(j)->cursor ++;\
 	} else {\
@@ -2468,9 +2450,7 @@ profiler_heap_shot_write_data_block (ProfilerHeapShotWriteJob *job) {
 	MONO_PROFILER_GET_CURRENT_TIME (start_time);
 	write_uint64 (start_counter);
 	write_uint64 (start_time);
-#if DEBUG_HEAP_PROFILER
-	printf ("profiler_heap_shot_write_data_block: start writing job %p (start %p, end %p)...\n", job, & (job->buffers->buffer [0]), job->cursor);
-#endif
+
 	buffer = job->buffers;
 	cursor = & (buffer->buffer [0]);
 	if (buffer->next != NULL) {
@@ -2481,15 +2461,11 @@ profiler_heap_shot_write_data_block (ProfilerHeapShotWriteJob *job) {
 	if (cursor >= end) {
 		cursor = NULL;
 	}
-#if DEBUG_HEAP_PROFILER
-	printf ("profiler_heap_shot_write_data_block: in job %p, starting at buffer %p and cursor %p\n", job, buffer, cursor);
-#endif
+
 	while (cursor != NULL) {
 		gpointer value = *cursor;
 		HeapProfilerJobValueCode code = GPOINTER_TO_UINT (value) & HEAP_CODE_MASK;
-#if DEBUG_HEAP_PROFILER
-		printf ("profiler_heap_shot_write_data_block: got value %p and code %d\n", value, code);
-#endif
+
 		
 		UPDATE_JOB_BUFFER_CURSOR ();
 		if (code == HEAP_CODE_FREE_OBJECT_CLASS) {
@@ -2508,9 +2484,6 @@ profiler_heap_shot_write_data_block (ProfilerHeapShotWriteJob *job) {
 			size = GPOINTER_TO_UINT (*cursor);
 			UPDATE_JOB_BUFFER_CURSOR ();
 			write_uint32 (size);
-#if DEBUG_HEAP_PROFILER
-			printf ("profiler_heap_shot_write_data_block: wrote unreachable object of class %p (id %d, size %d)\n", klass, class_id->id, size);
-#endif
 		} else if (code == HEAP_CODE_OBJECT) {
 			MonoObject *object = GUINT_TO_POINTER (GPOINTER_TO_UINT (value) & (~ (guint64) HEAP_CODE_MASK));
 			MonoClass *klass = mono_object_get_class (object);
@@ -2528,26 +2501,16 @@ profiler_heap_shot_write_data_block (ProfilerHeapShotWriteJob *job) {
 			write_uint32 (class_id->id);
 			write_uint32 (size);
 			write_uint32 (references);
-#if DEBUG_HEAP_PROFILER
-			printf ("profiler_heap_shot_write_data_block: writing object %p (references %d)\n", value, references);
-#endif
-			
 			while (references > 0) {
 				gpointer reference = *cursor;
 				write_uint64 (GPOINTER_TO_UINT (reference));
 				UPDATE_JOB_BUFFER_CURSOR ();
 				references --;
-#if DEBUG_HEAP_PROFILER
-				printf ("profiler_heap_shot_write_data_block:   inside object %p, wrote reference %p)\n", value, reference);
-#endif
 			}
 		} else {
-#if DEBUG_HEAP_PROFILER
-			printf ("profiler_heap_shot_write_data_block: unknown code %d in value %p\n", code, value);
-#endif
 			g_assert_not_reached ();
 		}
-	}
+	}//while (cursor != NULL) {
 	write_uint32 (0);
 	
 	MONO_PROFILER_GET_CURRENT_COUNTER (end_counter);
@@ -2556,9 +2519,6 @@ profiler_heap_shot_write_data_block (ProfilerHeapShotWriteJob *job) {
 	write_uint64 (end_time);
 	
 	write_current_block (MONO_PROFILER_FILE_BLOCK_KIND_HEAP_DATA);
-#if DEBUG_HEAP_PROFILER
-	printf ("profiler_heap_shot_write_data_block: writing job %p done.\n", job);
-#endif
 }
 static void
 profiler_heap_shot_write_summary_block (ProfilerHeapShotWriteJob *job) {
@@ -4438,6 +4398,10 @@ class_end_load (MonoProfiler *profiler, MonoClass *klass, int result) {
 	GET_NEXT_FREE_EVENT (data, event);
 	STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_LOAD | RESULT_TO_EVENT_CODE (result), MONO_PROFILER_EVENT_KIND_END);
 	COMMIT_RESERVED_EVENTS (data);
+
+	LOCK_PROFILER();
+	update_mapping(data);
+	UNLOCK_PROFILER();
 }
 static void
 class_start_unload (MonoProfiler *profiler, MonoClass *klass) {
@@ -4456,6 +4420,8 @@ class_end_unload (MonoProfiler *profiler, MonoClass *klass) {
 	GET_NEXT_FREE_EVENT (data, event);
 	STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_UNLOAD, MONO_PROFILER_EVENT_KIND_END);
 	COMMIT_RESERVED_EVENTS (data);
+
+
 }
 
 static void
@@ -4917,9 +4883,7 @@ profiler_heap_report_object_reachable (ProfilerHeapShotWriteJob *job, MonoObject
 		if (class_id == NULL) {
 			printf ("profiler_heap_report_object_reachable: class %p (%s.%s) has no id\n", klass, mono_class_get_namespace (klass), mono_class_get_name (klass));
 		}
-
-		if( class_id == NULL )
-			return;
+		 
 		g_assert (class_id != NULL);
 		
 		//更新对象总结信息
@@ -4927,18 +4891,16 @@ profiler_heap_report_object_reachable (ProfilerHeapShotWriteJob *job, MonoObject
 			guint32 id = class_id->id;
 			g_assert (id < job->summary.capacity);
 			
-			//记录
+			//记录可达对象数量
 			job->summary.per_class_data [id].reachable.instances ++;
 			job->summary.per_class_data [id].reachable.bytes += mono_object_get_size (obj);
 		}
+
 		if (profiler->action_flags.heap_shot && job->dump_heap_data) {
 			int reference_counter = 0;
 			gpointer *reference_counter_location;
 			
 			WRITE_HEAP_SHOT_JOB_VALUE_WITH_CODE (job, obj, HEAP_CODE_OBJECT);
-#if DEBUG_HEAP_PROFILER
-			printf ("profiler_heap_report_object_reachable: reported object %p at cursor %p\n", obj, (job->cursor - 1));
-#endif
 			WRITE_HEAP_SHOT_JOB_VALUE (job, NULL);
 			reference_counter_location = job->cursor - 1;
 			
@@ -4982,9 +4944,6 @@ profiler_heap_report_object_reachable (ProfilerHeapShotWriteJob *job, MonoObject
 			}
 			
 			*reference_counter_location = GINT_TO_POINTER (reference_counter);
-#if DEBUG_HEAP_PROFILER
-			printf ("profiler_heap_report_object_reachable: updated reference_counter_location %p with value %d\n", reference_counter_location, reference_counter);
-#endif
 		}
 	}
 }
@@ -5048,6 +5007,8 @@ profiler_heap_add_object (ProfilerHeapShotHeapBuffers *heap, ProfilerHeapShotWri
 	profiler_heap_report_object_reachable (job, obj);
 }
 
+//此函数从对象链表队尾弹出已死亡的对象，若发现在current_slot前还有存活对象
+//则返回此存活对象以覆盖待删除的current_slot对象。
 static MonoObject*
 profiler_heap_pop_object_from_end (ProfilerHeapShotHeapBuffers *heap, ProfilerHeapShotWriteJob *job, MonoObject** current_slot) {
 	while (heap->first_free_slot != current_slot) {
@@ -5085,6 +5046,7 @@ profiler_heap_scan (ProfilerHeapShotHeapBuffers *heap, ProfilerHeapShotWriteJob 
 			profiler_heap_report_object_reachable (job, obj);
 		} else {
 			profiler_heap_report_object_unreachable (job, obj);
+			//从当前对缓存中删除不可达对象。
 			*current_slot = profiler_heap_pop_object_from_end (heap, job, current_slot);
 		}
 		
@@ -5141,6 +5103,7 @@ process_gc_event (MonoProfiler *profiler, gboolean do_heap_profiling, MonoGCEven
 			ProfilerHeapShotWriteJob *job;
 			ProfilerPerThreadData *data;
 			
+			dump_heap_data = TRUE;
 			if (heap_shot_write_job_should_be_created (dump_heap_data)) {
 				job = profiler_heap_shot_write_job_new (profiler->heap_shot_was_requested, dump_heap_data, profiler->garbage_collection_counter);
 				profiler->heap_shot_was_requested = FALSE;
@@ -5150,8 +5113,12 @@ process_gc_event (MonoProfiler *profiler, gboolean do_heap_profiling, MonoGCEven
 				job = NULL;
 			}
 			
+			//扫描主profiler结构已经记录的堆对象，从中剔除已经不存在的对象
+			//并向job汇报依然存活的对象
 			profiler_heap_scan (&(profiler->heap), job);
 			
+			//对所有线程私有记录数据，扫描其堆对象记录若有新的存活对象，若有则加入主
+			//profiler结构的堆记录缓冲中，若没有则向job汇报不可达对象。
 			for (data = profiler->per_thread_data; data != NULL; data = data->next) {
 				ProfilerHeapShotObjectBuffer *buffer;
 				for (buffer = data->heap_shot_object_buffers; buffer != NULL; buffer = buffer->next) {
