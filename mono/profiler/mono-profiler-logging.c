@@ -1045,6 +1045,8 @@ static int event_counter = 0;
 #define EVENT_MARK() printf ("[EVENT:%d]", ++ event_counter)
 #endif
 
+void take_a_heap_snapshot(void);
+
 static void
 thread_stack_initialize_empty (ProfilerThreadStack *stack) {
 	stack->capacity = 0;
@@ -1818,10 +1820,7 @@ profiler_free_heap_shot_write_jobs (void) {
 		current_job->next = NULL;
 		current_job = next_job;
 		
-		while (current_job != NULL) {
-#if DEBUG_HEAP_PROFILER
-			printf ("profiler_free_heap_shot_write_jobs: job %p will be freed\n", current_job);
-#endif
+		while (current_job != NULL) { 
 			next_job = current_job->next;
 			profiler_heap_shot_write_job_free_buffers (current_job);
 			g_free (current_job);
@@ -2479,7 +2478,8 @@ profiler_heap_shot_write_data_block (ProfilerHeapShotWriteJob *job) {
 				printf ("profiler_heap_shot_write_data_block: unknown class %p", klass);
 			}
 			g_assert (class_id != NULL);
-			write_uint32 ((class_id->id << 2) | HEAP_CODE_FREE_OBJECT_CLASS);
+			write_uint32(HEAP_CODE_FREE_OBJECT_CLASS);
+			write_uint32 (class_id->id);
 			
 			size = GPOINTER_TO_UINT (*cursor);
 			UPDATE_JOB_BUFFER_CURSOR ();
@@ -2497,13 +2497,14 @@ profiler_heap_shot_write_data_block (ProfilerHeapShotWriteJob *job) {
 			}
 			g_assert (class_id != NULL);
 			
-			write_uint64 (GPOINTER_TO_UINT (value));
+			write_uint32(HEAP_CODE_OBJECT);
+			write_uint32(GPOINTER_TO_UINT(object)); 
 			write_uint32 (class_id->id);
 			write_uint32 (size);
 			write_uint32 (references);
 			while (references > 0) {
 				gpointer reference = *cursor;
-				write_uint64 (GPOINTER_TO_UINT (reference));
+				write_uint32 (GPOINTER_TO_UINT (reference));
 				UPDATE_JOB_BUFFER_CURSOR ();
 				references --;
 			}
@@ -4074,6 +4075,7 @@ flush_everything (void) {
 #define RESULT_TO_LOAD_CODE(r) (((r)==MONO_PROFILE_OK)?MONO_PROFILER_LOADED_EVENT_SUCCESS:MONO_PROFILER_LOADED_EVENT_FAILURE)
 static void
 appdomain_start_load (MonoProfiler *profiler, MonoDomain *domain) {
+
 	LOCK_PROFILER ();
 	loaded_element_load_start (profiler->loaded_appdomains, domain);
 	UNLOCK_PROFILER ();
@@ -4083,7 +4085,7 @@ static void
 appdomain_end_load (MonoProfiler *profiler, MonoDomain *domain, int result) {
 	char *name;
 	LoadedElement *element;
-	
+
 	name = g_strdup_printf ("%d", mono_domain_get_id (domain));
 	LOCK_PROFILER ();
 	element = loaded_element_load_end (profiler->loaded_appdomains, domain, name);
@@ -4093,6 +4095,7 @@ appdomain_end_load (MonoProfiler *profiler, MonoDomain *domain, int result) {
 
 static void
 appdomain_start_unload (MonoProfiler *profiler, MonoDomain *domain) {
+
 	LOCK_PROFILER ();
 	loaded_element_unload_start (profiler->loaded_appdomains, domain);
 	flush_everything ();
@@ -4102,7 +4105,7 @@ appdomain_start_unload (MonoProfiler *profiler, MonoDomain *domain) {
 static void
 appdomain_end_unload (MonoProfiler *profiler, MonoDomain *domain) {
 	LoadedElement *element;
-	
+
 	LOCK_PROFILER ();
 	element = loaded_element_unload_end (profiler->loaded_appdomains, domain);
 	write_element_unload_block (element, MONO_PROFILER_LOADED_EVENT_APPDOMAIN, CURRENT_THREAD_ID ());
@@ -4121,7 +4124,7 @@ module_end_load (MonoProfiler *profiler, MonoImage *module, int result) {
 	char *name;
 	MonoAssemblyName aname;
 	LoadedElement *element;
-	
+
 	if (mono_assembly_fill_assembly_name (module, &aname)) {
 		name = mono_stringify_assembly_name (&aname);
 	} else {
@@ -4136,6 +4139,7 @@ module_end_load (MonoProfiler *profiler, MonoImage *module, int result) {
 static void
 module_start_unload (MonoProfiler *profiler, MonoImage *module) {
 	LOCK_PROFILER ();
+
 	loaded_element_unload_start (profiler->loaded_modules, module);
 	flush_everything ();
 	UNLOCK_PROFILER ();
@@ -4154,6 +4158,7 @@ module_end_unload (MonoProfiler *profiler, MonoImage *module) {
 static void
 assembly_start_load (MonoProfiler *profiler, MonoAssembly *assembly) {
 	LOCK_PROFILER ();
+
 	loaded_element_load_start (profiler->loaded_assemblies, assembly);
 	UNLOCK_PROFILER ();
 }
@@ -4385,6 +4390,7 @@ static void
 class_start_load (MonoProfiler *profiler, MonoClass *klass) {
 	ProfilerPerThreadData *data;
 	ProfilerEventData *event;
+
 	GET_PROFILER_THREAD_DATA (data);
 	GET_NEXT_FREE_EVENT (data, event);
 	STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_LOAD, MONO_PROFILER_EVENT_KIND_START);
@@ -4394,6 +4400,7 @@ static void
 class_end_load (MonoProfiler *profiler, MonoClass *klass, int result) {
 	ProfilerPerThreadData *data;
 	ProfilerEventData *event;
+
 	GET_PROFILER_THREAD_DATA (data);
 	GET_NEXT_FREE_EVENT (data, event);
 	STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_LOAD | RESULT_TO_EVENT_CODE (result), MONO_PROFILER_EVENT_KIND_END);
@@ -4407,6 +4414,7 @@ static void
 class_start_unload (MonoProfiler *profiler, MonoClass *klass) {
 	ProfilerPerThreadData *data;
 	ProfilerEventData *event;
+
 	GET_PROFILER_THREAD_DATA (data);
 	GET_NEXT_FREE_EVENT (data, event);
 	STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_UNLOAD, MONO_PROFILER_EVENT_KIND_START);
@@ -4416,6 +4424,7 @@ static void
 class_end_unload (MonoProfiler *profiler, MonoClass *klass) {
 	ProfilerPerThreadData *data;
 	ProfilerEventData *event;
+
 	GET_PROFILER_THREAD_DATA (data);
 	GET_NEXT_FREE_EVENT (data, event);
 	STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_UNLOAD, MONO_PROFILER_EVENT_KIND_END);
@@ -4428,6 +4437,7 @@ static void
 method_start_jit (MonoProfiler *profiler, MonoMethod *method) {
 	ProfilerPerThreadData *data;
 	ProfilerEventData *event;
+
 	GET_PROFILER_THREAD_DATA (data);
 	GET_NEXT_FREE_EVENT (data, event);
 	thread_stack_push_jitted_safely (&(data->stack), method, TRUE);
@@ -4438,6 +4448,7 @@ static void
 method_end_jit (MonoProfiler *profiler, MonoMethod *method, int result) {
 	ProfilerPerThreadData *data;
 	ProfilerEventData *event;
+
 	GET_PROFILER_THREAD_DATA (data);
 	GET_NEXT_FREE_EVENT (data, event);
 	STORE_EVENT_ITEM_COUNTER (event, profiler, method, MONO_PROFILER_EVENT_DATA_TYPE_METHOD, MONO_PROFILER_EVENT_METHOD_JIT | RESULT_TO_EVENT_CODE (result), MONO_PROFILER_EVENT_KIND_END);
@@ -4468,6 +4479,7 @@ method_jit_result (MonoProfiler *prof, MonoMethod *method, MonoJitInfo* jinfo, i
 
 static void
 method_enter (MonoProfiler *profiler, MonoMethod *method) {
+	
 	ProfilerPerThreadData *data;
 	
 	CHECK_PROFILER_ENABLED ();
@@ -4503,6 +4515,7 @@ static void
 method_free (MonoProfiler *profiler, MonoMethod *method) {
 	ProfilerPerThreadData *data;
 	ProfilerEventData *event;
+
 	GET_PROFILER_THREAD_DATA (data);
 	GET_NEXT_FREE_EVENT (data, event);
 	STORE_EVENT_ITEM_COUNTER (event, profiler, method, MONO_PROFILER_EVENT_DATA_TYPE_METHOD, MONO_PROFILER_EVENT_METHOD_FREED, 0);
@@ -4513,6 +4526,7 @@ static void
 thread_start (MonoProfiler *profiler, gsize tid) {
 	ProfilerPerThreadData *data;
 	ProfilerEventData *event;
+
 	GET_PROFILER_THREAD_DATA (data);
 	GET_NEXT_FREE_EVENT (data, event);
 	STORE_EVENT_NUMBER_COUNTER (event, profiler, tid, MONO_PROFILER_EVENT_DATA_TYPE_OTHER, MONO_PROFILER_EVENT_THREAD, MONO_PROFILER_EVENT_KIND_START);
@@ -4522,6 +4536,7 @@ static void
 thread_end (MonoProfiler *profiler, gsize tid) {
 	ProfilerPerThreadData *data;
 	ProfilerEventData *event;
+	
 	GET_PROFILER_THREAD_DATA (data);
 	GET_NEXT_FREE_EVENT (data, event);
 	STORE_EVENT_NUMBER_COUNTER (event, profiler, tid, MONO_PROFILER_EVENT_DATA_TYPE_OTHER, MONO_PROFILER_EVENT_THREAD, MONO_PROFILER_EVENT_KIND_END);
@@ -4649,6 +4664,7 @@ monitor_event (MonoProfiler *profiler, MonoObject *obj, MonoProfilerMonitorEvent
 
 static void
 statistical_call_chain (MonoProfiler *profiler, int call_chain_depth, guchar **ips, void *context) {
+	
 	MonoDomain *domain = mono_domain_get ();
 	ProfilerStatisticalData *data;
 	unsigned int index;
@@ -4960,9 +4976,7 @@ profiler_heap_report_object_unreachable (ProfilerHeapShotWriteJob *job, MonoObje
 			if (class_id == NULL) {
 				printf ("profiler_heap_report_object_reachable: class %p (%s.%s) has no id\n", klass, mono_class_get_namespace (klass), mono_class_get_name (klass));
 			}
-
-			if( class_id == NULL )
-				return; 
+ 
 			g_assert (class_id != NULL);
 			id = class_id->id;
 			g_assert (id < job->summary.capacity);
@@ -5098,58 +5112,77 @@ process_gc_event (MonoProfiler *profiler, gboolean do_heap_profiling, MonoGCEven
 		UNLOCK_PROFILER ();
 		break;
 	case MONO_GC_EVENT_MARK_END: {//GC标记结束阶段
-
+		LOCK_PROFILER();
 		if (do_heap_profiling) {
-			ProfilerHeapShotWriteJob *job;
-			ProfilerPerThreadData *data;
-			
-			dump_heap_data = TRUE;
-			if (heap_shot_write_job_should_be_created (dump_heap_data)) {
-				job = profiler_heap_shot_write_job_new (profiler->heap_shot_was_requested, dump_heap_data, profiler->garbage_collection_counter);
-				profiler->heap_shot_was_requested = FALSE;
-				MONO_PROFILER_GET_CURRENT_COUNTER (job->start_counter);
-				MONO_PROFILER_GET_CURRENT_TIME (job->start_time);
-			} else {
-				job = NULL;
-			}
-			
-			//扫描主profiler结构已经记录的堆对象，从中剔除已经不存在的对象
-			//并向job汇报依然存活的对象
-			profiler_heap_scan (&(profiler->heap), job);
-			
-			//对所有线程私有记录数据，扫描其堆对象记录若有新的存活对象，若有则加入主
-			//profiler结构的堆记录缓冲中，若没有则向job汇报不可达对象。
-			for (data = profiler->per_thread_data; data != NULL; data = data->next) {
-				ProfilerHeapShotObjectBuffer *buffer;
-				for (buffer = data->heap_shot_object_buffers; buffer != NULL; buffer = buffer->next) {
-					MonoObject **cursor;
-					for (cursor = buffer->first_unprocessed_slot; cursor < buffer->next_free_slot; cursor ++) {
-						MonoObject *obj = *cursor;
-
-						if (mono_object_is_alive (obj)) {
-							profiler_heap_add_object (&(profiler->heap), job, obj);
-						} else {
-							profiler_heap_report_object_unreachable (job, obj);
-						}
-					}
-					buffer->first_unprocessed_slot = cursor;
-				}
-			}
-			
-			if (job != NULL) {
-				MONO_PROFILER_GET_CURRENT_COUNTER (job->end_counter);
-				MONO_PROFILER_GET_CURRENT_TIME (job->end_time);
-				
-				profiler_add_heap_shot_write_job (job);
-				profiler_free_heap_shot_write_jobs ();
-				WRITER_EVENT_RAISE ();
-			}
+			take_a_heap_snapshot();
+			WRITER_EVENT_RAISE ();
 		}
+		UNLOCK_PROFILER();
 		break;
 	}//end of case MONO_GC_EVENT_MARK_END: {
 	default:
 		break;
 	}
+}
+
+static void 
+take_a_heap_snapshot(void)
+{
+	ProfilerHeapShotWriteJob *job;
+	ProfilerPerThreadData *data;
+	ProfilerStatisticalData *statistical_data;
+	 
+	job = profiler_heap_shot_write_job_new(profiler->heap_shot_was_requested, TRUE, profiler->garbage_collection_counter);
+	profiler->heap_shot_was_requested = FALSE;
+	MONO_PROFILER_GET_CURRENT_COUNTER(job->start_counter);
+	MONO_PROFILER_GET_CURRENT_TIME(job->start_time);
+
+	//扫描主profiler结构已经记录的堆对象，从中剔除已经不存在的对象
+	//并向job汇报依然存活的对象
+	profiler_heap_scan(&(profiler->heap), job);
+
+	//对所有线程私有记录数据，扫描其堆对象记录若有新的存活对象，若有则加入主
+	//profiler结构的堆记录缓冲中，若没有则向job汇报不可达对象。
+	for (data = profiler->per_thread_data; data != NULL; data = data->next) {
+		ProfilerHeapShotObjectBuffer *buffer;
+		for (buffer = data->heap_shot_object_buffers; buffer != NULL; buffer = buffer->next) {
+			MonoObject **cursor;
+			for (cursor = buffer->first_unprocessed_slot; cursor < buffer->next_free_slot; cursor++) {
+				MonoObject *obj = *cursor;
+
+				if (mono_object_is_alive(obj)) {
+					profiler_heap_add_object(&(profiler->heap), job, obj);
+				}
+				else {
+					profiler_heap_report_object_unreachable(job, obj);
+				}
+			}
+			buffer->first_unprocessed_slot = cursor;
+		}
+	}
+	 
+	MONO_PROFILER_GET_CURRENT_COUNTER(job->end_counter);
+	MONO_PROFILER_GET_CURRENT_TIME(job->end_time);
+
+	profiler_add_heap_shot_write_job(job);
+	profiler_free_heap_shot_write_jobs();  
+
+	//
+	statistical_data = profiler->statistical_data_ready;
+	flush_all_mappings ();  
+	if (statistical_data != NULL) 
+	{
+		LOG_WRITER_THREAD ("data_writer_thread: writing statistical data...");
+		profiler->statistical_data_ready = NULL;
+		write_statistical_data_block (statistical_data);
+		statistical_data->next_free_index = 0;
+		statistical_data->first_unwritten_index = 0;
+		profiler->statistical_data_second_buffer = statistical_data;
+		LOG_WRITER_THREAD ("data_writer_thread: wrote statistical data");
+	} 
+	profiler_process_heap_shot_write_jobs ();
+	flush_everything();
+
 }
 
 static void
@@ -5186,6 +5219,7 @@ static void
 gc_resize (MonoProfiler *profiler, gint64 new_size) {
 	ProfilerPerThreadData *data;
 	ProfilerEventData *event;
+
 	GET_PROFILER_THREAD_DATA (data);
 	GET_NEXT_FREE_EVENT (data, event);
 	profiler->garbage_collection_counter ++;
@@ -5376,6 +5410,8 @@ profiler_shutdown (MonoProfiler *prof)
 	ProfilerPerThreadData* current_thread_data;
 	ProfilerPerThreadData* next_thread_data;
 	
+
+
 	LOG_WRITER_THREAD ("profiler_shutdown: zeroing relevant flags");
 	mono_profiler_set_events (0);
 	//profiler->flags = 0;
@@ -5897,7 +5933,7 @@ mono_profiler_startup (const char *desc)
 	WRITER_EVENT_INIT();
 
 	//创建数据写线程？详细看data_writer_thread。
-	CREATE_WRITER_THREAD (data_writer_thread); 
+	//CREATE_WRITER_THREAD (data_writer_thread); 
 	if ((profiler->command_port >= 1024) && (profiler->command_port <= 65535)) {
 		//创建用户线程,详细看user_thread。
 		CREATE_USER_THREAD (user_thread);
