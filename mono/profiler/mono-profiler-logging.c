@@ -1229,6 +1229,12 @@ class_id_mapping_element_new (MonoClass *klass) {
 	ClassIdMappingElement *result = g_new (ClassIdMappingElement, 1);
 	
 	result->name = mono_type_full_name (mono_class_get_type (klass));
+
+	if(!strcmp(result->name,""))
+	{
+		int i = 3;
+	}
+
 	result->klass = klass;
 	result->next_unwritten = profiler->classes->unwritten;
 	profiler->classes->unwritten = result;
@@ -1276,30 +1282,36 @@ class_id_mapping_element_build_layout_bitmap (MonoClass *klass, ClassIdMappingEl
 		if (mono_field_get_flags (field) & 0x0010 /*FIELD_ATTRIBUTE_STATIC*/)
 			continue;
 		
-		//若为引用字段
+		//若为引用类型字段
 		if (MONO_TYPE_IS_REFERENCE (field_type)) {
 			int field_offset = mono_field_get_offset (field) - sizeof (MonoObject);
 			if (field_offset > max_offset_of_reference_fields) {
 				max_offset_of_reference_fields = field_offset;
 			}
 			number_of_reference_fields ++;
-		} else {
+		} else {//若字段为值类型
 			MonoClass *field_class = mono_class_from_mono_type (field_type);
-			if (field_class && mono_class_is_valuetype (field_class)) {
+			if (field_class && mono_class_is_valuetype (field_class)) 
+			{
 				ClassIdMappingElement *field_id = class_id_mapping_element_get (field_class);
 				g_assert (field_id != NULL);
 				
-				if (field_id->data.layout.slots == CLASS_LAYOUT_NOT_INITIALIZED) {
-					if (field_id != klass_id) {
+				if (field_id->data.layout.slots == CLASS_LAYOUT_NOT_INITIALIZED) 
+				{
+					if (field_id != klass_id) 
+					{
 						class_id_mapping_element_build_layout_bitmap (field_class, field_id);
-					} else {
+					} 
+					else 
+					{
 						klass_id->data.bitmap.compact = 0;
 						klass_id->data.layout.slots = 0;
 						klass_id->data.layout.references = 0;
 					}
 				}
 				
-				if (field_id->data.layout.references > 0) {
+				if (field_id->data.layout.references > 0) 
+				{
 					int field_offset = mono_field_get_offset (field) - sizeof (MonoObject);
 					int max_offset_reference_in_field = (field_id->data.layout.slots - 1) * sizeof (gpointer);
 					
@@ -1311,10 +1323,11 @@ class_id_mapping_element_build_layout_bitmap (MonoClass *klass, ClassIdMappingEl
 				}
 			}//if (field_class && mono_class_is_valuetype(field_class)) {
 		}
-	}
+	}//while ((field = mono_class_get_fields (klass, &iter)) != NULL) {
 	
 
-	if ((number_of_reference_fields == 0) && ((parent_id == NULL) || (parent_id->data.layout.references == 0))) {
+	if ((number_of_reference_fields == 0) && ((parent_id == NULL) || (parent_id->data.layout.references == 0))) 
+	{
 		klass_id->data.bitmap.compact = 0;
 		klass_id->data.layout.slots = 0;
 		klass_id->data.layout.references = 0;
@@ -1332,60 +1345,39 @@ class_id_mapping_element_build_layout_bitmap (MonoClass *klass, ClassIdMappingEl
 			klass_id->data.layout.references += number_of_reference_fields;
 		}
 		
-		if (klass_id->data.layout.slots <= CLASS_LAYOUT_PACKED_BITMAP_SIZE) {
-#if (DEBUG_CLASS_BITMAPS)
-				printf ("[zeroing bitmap]");
-#endif
+		if (klass_id->data.layout.slots <= CLASS_LAYOUT_PACKED_BITMAP_SIZE) { 
 				klass_id->data.bitmap.compact = 0;
-			if ((parent_id != NULL) && (parent_id->data.layout.references > 0)) {
-#if (DEBUG_CLASS_BITMAPS)
-				printf ("[copying compact father bitmap]");
-#endif
+			if ((parent_id != NULL) && (parent_id->data.layout.references > 0)) { 
 				klass_id->data.bitmap.compact = parent_id->data.bitmap.compact;
 			}
 		} else {
 			int size_of_bitmap = klass_id->data.layout.slots;
-			BITS_TO_BYTES (size_of_bitmap);
-#if (DEBUG_CLASS_BITMAPS)
-			printf ("[allocating %d bytes for bitmap]", size_of_bitmap);
-#endif
+			BITS_TO_BYTES (size_of_bitmap); 
 			klass_id->data.bitmap.extended = g_malloc0 (size_of_bitmap);
 			if ((parent_id != NULL) && (parent_id->data.layout.references > 0)) {
 				int size_of_father_bitmap = parent_id->data.layout.slots;
 				if (size_of_father_bitmap <= CLASS_LAYOUT_PACKED_BITMAP_SIZE) {
-					int father_slot;
-#if (DEBUG_CLASS_BITMAPS)
-					printf ("[copying %d bits from father bitmap]", size_of_father_bitmap);
-#endif
+					int father_slot; 
 					for (father_slot = 0; father_slot < size_of_father_bitmap; father_slot ++) {
 						if (parent_id->data.bitmap.compact & (((guint64)1) << father_slot)) {
 							klass_id->data.bitmap.extended [father_slot >> 3] |= (1 << (father_slot & 7));
 						}
 					}
 				} else {
-					BITS_TO_BYTES (size_of_father_bitmap);
-#if (DEBUG_CLASS_BITMAPS)
-					printf ("[copying %d bytes from father bitmap]", size_of_father_bitmap);
-#endif
+					BITS_TO_BYTES (size_of_father_bitmap); 
 					memcpy (klass_id->data.bitmap.extended, parent_id->data.bitmap.extended, size_of_father_bitmap);
 				}
 			}
 		}
 	}
-	
-#if (DEBUG_CLASS_BITMAPS)
-	printf ("[starting filling iteration]\n");
-#endif
+	 
 	iter = NULL;
 	while ((field = mono_class_get_fields (klass, &iter)) != NULL) {
 		MonoType* field_type = mono_field_get_type (field);
 		// For now, skip static fields
 		if (mono_field_get_flags (field) & 0x0010 /*FIELD_ATTRIBUTE_STATIC*/)
 			continue;
-		
-#if (DEBUG_CLASS_BITMAPS)
-		printf ("[Working on field %s]", mono_field_get_name (field));
-#endif
+		 
 		if (MONO_TYPE_IS_REFERENCE (field_type)) {
 			int field_offset = mono_field_get_offset (field) - sizeof (MonoObject);
 			int field_slot;
@@ -1395,10 +1387,7 @@ class_id_mapping_element_build_layout_bitmap (MonoClass *klass, ClassIdMappingEl
 				klass_id->data.bitmap.compact |= (((guint64)1) << field_slot);
 			} else {
 				klass_id->data.bitmap.extended [field_slot >> 3] |= (1 << (field_slot & 7));
-			}
-#if (DEBUG_CLASS_BITMAPS)
-			printf ("[reference at offset %d, slot %d]", field_offset, field_slot);
-#endif
+			} 
 		} else {
 			MonoClass *field_class = mono_class_from_mono_type (field_type);
 			if (field_class && mono_class_is_valuetype (field_class)) {
@@ -1443,30 +1432,7 @@ class_id_mapping_element_build_layout_bitmap (MonoClass *klass, ClassIdMappingEl
 			}
 		}
 	}
-#if (DEBUG_CLASS_BITMAPS)
-	do {
-		int slot;
-		printf ("\nLayot of class \"%s.%s\": references %d, slots %d, bitmap {", mono_class_get_namespace (klass), mono_class_get_name (klass), klass_id->data.layout.references, klass_id->data.layout.slots);
-		for (slot = 0; slot < klass_id->data.layout.slots; slot ++) {
-			if (klass_id->data.layout.slots <= CLASS_LAYOUT_PACKED_BITMAP_SIZE) {
-				if (klass_id->data.bitmap.compact & (((guint64)1) << slot)) {
-					printf (" 1");
-				} else {
-					printf (" 0");
-				}
-			} else {
-				if (klass_id->data.bitmap.extended [slot >> 3] & (1 << (slot & 7))) {
-					printf (" 1");
-				} else {
-					printf (" 0");
-				}
-;			}
-			
-		}
-		printf (" }\n");
-		
-	} while (0);
-#endif
+
 }
 
 static MethodIdMappingElement*
@@ -2658,8 +2624,17 @@ write_mapping_block (gsize thread_id) {
 		guint32 assembly_id = loaded_element_get_id (profiler->loaded_assemblies, assembly);
 		write_uint32 (current_class->id);
 		write_uint32 (assembly_id);
-		write_string (current_class->name);
- 
+
+		//if( !strcmp(current_class->name ,"") )
+		//{ 
+		//	
+		//}else{
+			write_string (current_class->name);
+		//}
+
+		
+
+		
 		g_free (current_class->name);
 		current_class->name = NULL;
 	}
@@ -4406,9 +4381,9 @@ class_end_load (MonoProfiler *profiler, MonoClass *klass, int result) {
 	STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_LOAD | RESULT_TO_EVENT_CODE (result), MONO_PROFILER_EVENT_KIND_END);
 	COMMIT_RESERVED_EVENTS (data);
 
-	LOCK_PROFILER();
+	/*LOCK_PROFILER();
 	update_mapping(data);
-	UNLOCK_PROFILER();
+	UNLOCK_PROFILER();*/
 }
 static void
 class_start_unload (MonoProfiler *profiler, MonoClass *klass) {
@@ -5115,7 +5090,6 @@ process_gc_event (MonoProfiler *profiler, gboolean do_heap_profiling, MonoGCEven
 		LOCK_PROFILER();
 		if (do_heap_profiling) {
 			take_a_heap_snapshot();
-			WRITER_EVENT_RAISE ();
 		}
 		UNLOCK_PROFILER();
 		break;
@@ -5125,17 +5099,49 @@ process_gc_event (MonoProfiler *profiler, gboolean do_heap_profiling, MonoGCEven
 	}
 }
 
+static gboolean 
+is_heap_snapshot_request(void)
+{
+	FILE* pFile = NULL;
+	unsigned int hs_request = 0;
+	unsigned int reset_request = 0;
+
+	fopen_s(&pFile , "heapshotctrl" ,"rb+");
+	if(pFile)
+	{
+		fread(&hs_request , sizeof(hs_request) , 1 , pFile );
+		if( hs_request )
+		{
+			fseek(pFile,0,SEEK_SET); 
+			fwrite(&reset_request,sizeof(reset_request),1,pFile);
+		}
+		fclose(pFile);
+
+		if(hs_request)
+			return TRUE;
+		else
+			return FALSE;
+	}//if(pFile)
+
+	return FALSE;
+}
+
 static void 
 take_a_heap_snapshot(void)
 {
-	ProfilerHeapShotWriteJob *job;
-	ProfilerPerThreadData *data;
-	ProfilerStatisticalData *statistical_data;
+	ProfilerHeapShotWriteJob *job = NULL;
+	ProfilerPerThreadData *data = NULL;
+	ProfilerStatisticalData *statistical_data = NULL;
 	 
-	job = profiler_heap_shot_write_job_new(profiler->heap_shot_was_requested, TRUE, profiler->garbage_collection_counter);
-	profiler->heap_shot_was_requested = FALSE;
-	MONO_PROFILER_GET_CURRENT_COUNTER(job->start_counter);
-	MONO_PROFILER_GET_CURRENT_TIME(job->start_time);
+	flush_all_mappings ();  
+	 
+	if(is_heap_snapshot_request()) 
+	{ 
+		job = profiler_heap_shot_write_job_new(profiler->heap_shot_was_requested, TRUE, profiler->garbage_collection_counter);
+		profiler->heap_shot_was_requested = FALSE;
+		MONO_PROFILER_GET_CURRENT_COUNTER(job->start_counter);
+		MONO_PROFILER_GET_CURRENT_TIME(job->start_time);
+	}
 
 	//扫描主profiler结构已经记录的堆对象，从中剔除已经不存在的对象
 	//并向job汇报依然存活的对象
@@ -5161,27 +5167,30 @@ take_a_heap_snapshot(void)
 		}
 	}
 	 
-	MONO_PROFILER_GET_CURRENT_COUNTER(job->end_counter);
-	MONO_PROFILER_GET_CURRENT_TIME(job->end_time);
 
-	profiler_add_heap_shot_write_job(job);
-	profiler_free_heap_shot_write_jobs();  
+	if( job )
+	{ 
+		MONO_PROFILER_GET_CURRENT_COUNTER(job->end_counter);
+		MONO_PROFILER_GET_CURRENT_TIME(job->end_time);
 
-	//
-	statistical_data = profiler->statistical_data_ready;
-	flush_all_mappings ();  
-	if (statistical_data != NULL) 
-	{
-		LOG_WRITER_THREAD ("data_writer_thread: writing statistical data...");
-		profiler->statistical_data_ready = NULL;
-		write_statistical_data_block (statistical_data);
-		statistical_data->next_free_index = 0;
-		statistical_data->first_unwritten_index = 0;
-		profiler->statistical_data_second_buffer = statistical_data;
-		LOG_WRITER_THREAD ("data_writer_thread: wrote statistical data");
-	} 
-	profiler_process_heap_shot_write_jobs ();
-	flush_everything();
+		profiler_add_heap_shot_write_job(job);
+		profiler_free_heap_shot_write_jobs();  
+
+		//
+		statistical_data = profiler->statistical_data_ready;
+		if (statistical_data != NULL) 
+		{
+			LOG_WRITER_THREAD ("data_writer_thread: writing statistical data...");
+			profiler->statistical_data_ready = NULL;
+			write_statistical_data_block (statistical_data);
+			statistical_data->next_free_index = 0;
+			statistical_data->first_unwritten_index = 0;
+			profiler->statistical_data_second_buffer = statistical_data;
+			LOG_WRITER_THREAD ("data_writer_thread: wrote statistical data");
+		} 
+		profiler_process_heap_shot_write_jobs ();
+		flush_everything();
+	}
 
 }
 
