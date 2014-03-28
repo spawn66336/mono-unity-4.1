@@ -70,7 +70,7 @@ wrapper_type_to_str (guint32 wrapper_type)
 
 #endif
 
-static void
+ void
 append_class_name (GString *res, MonoClass *class, gboolean include_namespace)
 {
 	if (!class) {

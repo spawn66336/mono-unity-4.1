@@ -44,6 +44,8 @@ char*           mono_method_full_name (MonoMethod *method, gboolean signature);
 
 char*           mono_field_full_name (MonoClassField *field);
 
+void append_class_name (GString *res, MonoClass *class, gboolean include_namespace);
+
 G_END_DECLS
 
 #endif /* __MONO_DEBUG_HELPERS_H__ */

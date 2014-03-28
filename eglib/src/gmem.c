@@ -51,10 +51,10 @@
  
  static MonoMemoryCallbacks memory_callbacks =
 	{
-		profiler_malloc,
-		profiler_free,
-		profiler_calloc,
-		profiler_realloc
+		malloc,
+		free,
+		calloc,
+		realloc
 	};
 
  void* profiler_malloc( size_t size )

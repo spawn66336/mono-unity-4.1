@@ -394,12 +394,19 @@ typedef struct _ProfilerHeapShotObjectBuffer {
 	MonoObject *buffer [PROFILER_HEAP_SHOT_OBJECT_BUFFER_SIZE];
 } ProfilerHeapShotObjectBuffer;
 
+ 
+typedef struct _ProfilerHeapObjectInfo
+{
+	MonoObject* obj;
+	int				  alive;
+}ProfilerHeapObjectInfo;
+
 typedef struct _ProfilerHeapShotHeapBuffer {
 	struct _ProfilerHeapShotHeapBuffer *next;
 	struct _ProfilerHeapShotHeapBuffer *previous;
-	MonoObject **start_slot;
-	MonoObject **end_slot;
-	MonoObject *buffer [PROFILER_HEAP_SHOT_HEAP_BUFFER_SIZE];
+	ProfilerHeapObjectInfo* start_slot;
+	ProfilerHeapObjectInfo* end_slot;
+	ProfilerHeapObjectInfo  buffer [PROFILER_HEAP_SHOT_HEAP_BUFFER_SIZE];
 } ProfilerHeapShotHeapBuffer;
 
 typedef struct _ProfilerHeapShotHeapBuffers {
@@ -407,7 +414,7 @@ typedef struct _ProfilerHeapShotHeapBuffers {
 	ProfilerHeapShotHeapBuffer *last;
 	ProfilerHeapShotHeapBuffer *current;
 	//指向当前块current的第一个空闲槽位
-	MonoObject **first_free_slot;
+	ProfilerHeapObjectInfo* first_free_slot;
 } ProfilerHeapShotHeapBuffers;
 
 
@@ -1001,6 +1008,12 @@ struct _MonoProfiler {
 };
 static MonoProfiler *profiler;
 
+
+/*
+============================
+			注册的用户控制的内部调用函数
+============================
+*/
 static void
 enable_profiler (void) {
 	profiler->profiler_enabled = TRUE;
@@ -1045,7 +1058,7 @@ static int event_counter = 0;
 #define EVENT_MARK() printf ("[EVENT:%d]", ++ event_counter)
 #endif
 
-void take_a_heap_snapshot(void);
+void save_heapshot(void);
 
 static void
 thread_stack_initialize_empty (ProfilerThreadStack *stack) {
@@ -1227,12 +1240,17 @@ method_id_mapping_element_get (MonoMethod *method) {
 static ClassIdMappingElement*
 class_id_mapping_element_new (MonoClass *klass) {
 	ClassIdMappingElement *result = g_new (ClassIdMappingElement, 1);
-	
+	GString *class_name = NULL;
 	result->name = mono_type_full_name (mono_class_get_type (klass));
 
+	//若类型名为空则使用类名作为类型名
 	if(!strcmp(result->name,""))
-	{
-		int i = 3;
+	{ 
+		g_free(result->name);
+		result->name = NULL;
+		class_name = g_string_new ("");
+		append_class_name (class_name, klass, TRUE);
+		result->name = g_string_free (class_name, FALSE);
 	}
 
 	result->klass = klass;
@@ -1251,6 +1269,17 @@ class_id_mapping_element_new (MonoClass *klass) {
 	printf ("Created new CLASS mapping element \"%s\" (%p)[%d]\n", result->name, klass, result->id);
 #endif
 	return result;
+}
+
+//尝试向profiler类注册表里加入指定类
+static void
+try_insert_class_id_mapping_element( MonoClass* klass )
+{
+	ClassIdMappingElement *element = class_id_mapping_element_get (klass);
+	if (element == NULL) 
+	{ 
+		class_id_mapping_element_new (klass);
+	}
 }
 
 static void
@@ -1459,6 +1488,7 @@ method_id_mapping_element_new (MonoMethod *method) {
 }
 
 
+//销毁函数映射表元素
 static void
 method_id_mapping_element_destroy (gpointer element) {
 	MethodIdMappingElement *e = (MethodIdMappingElement*) element;
@@ -1466,7 +1496,8 @@ method_id_mapping_element_destroy (gpointer element) {
 		g_free (e->name);
 	g_free (element);
 }
-
+ 
+//销毁类映射表元素
 static void
 class_id_mapping_element_destroy (gpointer element) {
 	ClassIdMappingElement *e = (ClassIdMappingElement*) element;
@@ -1477,6 +1508,7 @@ class_id_mapping_element_destroy (gpointer element) {
 	g_free (element);
 }
 
+//创建函数映射表
 static MethodIdMapping*
 method_id_mapping_new (void) {
 	MethodIdMapping *result = g_new (MethodIdMapping, 1);
@@ -1487,6 +1519,7 @@ method_id_mapping_new (void) {
 	return result;
 }
 
+//创建类映射表
 static ClassIdMapping*
 class_id_mapping_new (void) {
 	ClassIdMapping *result = g_new (ClassIdMapping, 1);
@@ -1502,6 +1535,7 @@ method_id_mapping_destroy (MethodIdMapping *map) {
 	g_hash_table_destroy (map->table);
 	g_free (map);
 }
+
 
 static void
 class_id_mapping_destroy (ClassIdMapping *map) {
@@ -2623,25 +2657,17 @@ write_mapping_block (gsize thread_id) {
 		MonoAssembly *assembly = mono_image_get_assembly (image);
 		guint32 assembly_id = loaded_element_get_id (profiler->loaded_assemblies, assembly);
 		write_uint32 (current_class->id);
-		write_uint32 (assembly_id);
+		write_uint32 (assembly_id); 
+		write_string (current_class->name); 
 
-		//if( !strcmp(current_class->name ,"") )
-		//{ 
-		//	
-		//}else{
-			write_string (current_class->name);
-		//}
-
-		
-
-		
 		g_free (current_class->name);
 		current_class->name = NULL;
 	}
 	write_uint32 (0);
 	profiler->classes->unwritten = NULL;
 	
-	for (current_method = profiler->methods->unwritten; current_method != NULL; current_method = current_method->next_unwritten) {
+	for (current_method = profiler->methods->unwritten; current_method != NULL; current_method = current_method->next_unwritten) 
+	{
 		MonoMethod *method = current_method->method;
 		MonoClass *klass = mono_method_get_class (method);
 		ClassIdMappingElement *class_element = class_id_mapping_element_get (klass);
@@ -2663,9 +2689,7 @@ write_mapping_block (gsize thread_id) {
 	
 	write_clock_data ();
 	write_current_block (MONO_PROFILER_FILE_BLOCK_KIND_MAPPING);
-	
- 
-}
+ }
 
 typedef enum {
 	MONO_PROFILER_PACKED_EVENT_CODE_METHOD_ENTER = 1,
@@ -4132,8 +4156,7 @@ module_end_unload (MonoProfiler *profiler, MonoImage *module) {
 
 static void
 assembly_start_load (MonoProfiler *profiler, MonoAssembly *assembly) {
-	LOCK_PROFILER ();
-
+	LOCK_PROFILER (); 
 	loaded_element_load_start (profiler->loaded_assemblies, assembly);
 	UNLOCK_PROFILER ();
 }
@@ -4143,13 +4166,12 @@ assembly_end_load (MonoProfiler *profiler, MonoAssembly *assembly, int result) {
 	char *name;
 	MonoAssemblyName aname;
 	LoadedElement *element;
-	
+	LOCK_PROFILER ();
 	if (mono_assembly_fill_assembly_name (mono_assembly_get_image (assembly), &aname)) {
 		name = mono_stringify_assembly_name (&aname);
 	} else {
 		name = g_strdup_printf ("Dynamic assembly \"%p\"", assembly);
-	}
-	LOCK_PROFILER ();
+	} 
 	element = loaded_element_load_end (profiler->loaded_assemblies, assembly, name);
 	write_element_load_block (element, MONO_PROFILER_LOADED_EVENT_ASSEMBLY | RESULT_TO_LOAD_CODE (result), CURRENT_THREAD_ID (), assembly);
 	UNLOCK_PROFILER ();
@@ -4164,8 +4186,7 @@ assembly_start_unload (MonoProfiler *profiler, MonoAssembly *assembly) {
 }
 static void
 assembly_end_unload (MonoProfiler *profiler, MonoAssembly *assembly) {
-	LoadedElement *element;
-	
+	LoadedElement *element; 
 	LOCK_PROFILER ();
 	element = loaded_element_unload_end (profiler->loaded_assemblies, assembly);
 	write_element_unload_block (element, MONO_PROFILER_LOADED_EVENT_ASSEMBLY, CURRENT_THREAD_ID ());
@@ -4361,51 +4382,56 @@ print_event_data (ProfilerPerThreadData *data, ProfilerEventData *event, guint64
 	}\
 }while (0);
 
-static void
-class_start_load (MonoProfiler *profiler, MonoClass *klass) {
-	ProfilerPerThreadData *data;
-	ProfilerEventData *event;
 
-	GET_PROFILER_THREAD_DATA (data);
-	GET_NEXT_FREE_EVENT (data, event);
-	STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_LOAD, MONO_PROFILER_EVENT_KIND_START);
-	COMMIT_RESERVED_EVENTS (data);
+
+static void
+class_start_load (MonoProfiler *profiler, MonoClass *klass) 
+{
+	//ProfilerPerThreadData *data;
+	//ProfilerEventData *event;
+
+	//GET_PROFILER_THREAD_DATA (data);
+	//GET_NEXT_FREE_EVENT (data, event);
+	//STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_LOAD, MONO_PROFILER_EVENT_KIND_START);
+	//COMMIT_RESERVED_EVENTS (data);
 }
 static void
-class_end_load (MonoProfiler *profiler, MonoClass *klass, int result) {
-	ProfilerPerThreadData *data;
-	ProfilerEventData *event;
+class_end_load (MonoProfiler *profiler, MonoClass *klass, int result) 
+{
+	/*ProfilerPerThreadData *data;
+	ProfilerEventData *event;*/
 
-	GET_PROFILER_THREAD_DATA (data);
-	GET_NEXT_FREE_EVENT (data, event);
-	STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_LOAD | RESULT_TO_EVENT_CODE (result), MONO_PROFILER_EVENT_KIND_END);
-	COMMIT_RESERVED_EVENTS (data);
+	//GET_PROFILER_THREAD_DATA (data);
+	//GET_NEXT_FREE_EVENT (data, event);
+	//STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_LOAD | RESULT_TO_EVENT_CODE (result), MONO_PROFILER_EVENT_KIND_END);
+	//COMMIT_RESERVED_EVENTS (data);
 
-	/*LOCK_PROFILER();
-	update_mapping(data);
-	UNLOCK_PROFILER();*/
+	
+	LOCK_PROFILER();
+	try_insert_class_id_mapping_element( klass );
+	UNLOCK_PROFILER();
 }
 static void
-class_start_unload (MonoProfiler *profiler, MonoClass *klass) {
-	ProfilerPerThreadData *data;
-	ProfilerEventData *event;
+class_start_unload (MonoProfiler *profiler, MonoClass *klass) 
+{
+	/*ProfilerPerThreadData *data;
+	ProfilerEventData *event;*/
 
-	GET_PROFILER_THREAD_DATA (data);
-	GET_NEXT_FREE_EVENT (data, event);
-	STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_UNLOAD, MONO_PROFILER_EVENT_KIND_START);
-	COMMIT_RESERVED_EVENTS (data);
+	//GET_PROFILER_THREAD_DATA (data);
+	//GET_NEXT_FREE_EVENT (data, event);
+	//STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_UNLOAD, MONO_PROFILER_EVENT_KIND_START);
+	//COMMIT_RESERVED_EVENTS (data);
 }
 static void
-class_end_unload (MonoProfiler *profiler, MonoClass *klass) {
+class_end_unload (MonoProfiler *profiler, MonoClass *klass) 
+{
 	ProfilerPerThreadData *data;
 	ProfilerEventData *event;
 
-	GET_PROFILER_THREAD_DATA (data);
-	GET_NEXT_FREE_EVENT (data, event);
-	STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_UNLOAD, MONO_PROFILER_EVENT_KIND_END);
-	COMMIT_RESERVED_EVENTS (data);
-
-
+	//GET_PROFILER_THREAD_DATA (data);
+	//GET_NEXT_FREE_EVENT (data, event);
+	//STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_UNLOAD, MONO_PROFILER_EVENT_KIND_END);
+	//COMMIT_RESERVED_EVENTS (data); 
 }
 
 static void
@@ -4539,72 +4565,79 @@ save_stack_delta (MonoProfiler *profiler, ProfilerPerThreadData *data, ProfilerE
 	return events;
 }
 
+static void profiler_heap_add_object (ProfilerHeapShotHeapBuffers *heap, MonoObject *obj) ;
+
 //对象分配回调，此回调会在分配线程中调用
 static void
-object_allocated (MonoProfiler *profiler, MonoObject *obj, MonoClass *klass) {
-	
-	ProfilerPerThreadData *data;
-	ProfilerEventData *events;
-	int unsaved_frames;
-	int event_slot_count;
-	
-	GET_PROFILER_THREAD_DATA (data);
+object_allocated (MonoProfiler *profiler, MonoObject *obj, MonoClass *klass) 
+{
+	LOCK_PROFILER();
+	profiler_heap_add_object( &(profiler->heap) , obj );
+	UNLOCK_PROFILER(); 
+	//ProfilerPerThreadData *data;
+	//ProfilerEventData *events;
+	//int unsaved_frames;
+	//int event_slot_count;
+	//
+	//GET_PROFILER_THREAD_DATA (data);
 
-	//根据标识统计新生成的Event数
-	event_slot_count = 1;
-	if (profiler->action_flags.save_allocation_caller) {
-		event_slot_count ++;
-	}
-	if (profiler->action_flags.allocations_carry_id) {
-		event_slot_count ++;
-	}
-	if (profiler->action_flags.save_allocation_stack) {
-		unsaved_frames = thread_stack_count_unsaved_frames (&(data->stack));
-		event_slot_count += (unsaved_frames + 1);
-	} else {
-		unsaved_frames = 0;
-	}
+	////根据标识统计新生成的Event数
+	//event_slot_count = 1;
+	//if (profiler->action_flags.save_allocation_caller) {
+	//	event_slot_count ++;
+	//}
+	//if (profiler->action_flags.allocations_carry_id) {
+	//	event_slot_count ++;
+	//}
+	//if (profiler->action_flags.save_allocation_stack) {
+	//	unsaved_frames = thread_stack_count_unsaved_frames (&(data->stack));
+	//	event_slot_count += (unsaved_frames + 1);
+	//} else {
+	//	unsaved_frames = 0;
+	//}
+	//
+	////分配Event，若Event列表已满则将旧Event数据更新至Profiler数据结构
+	////中，并清空Event列表以供分配。
+	//RESERVE_EVENTS (data, events, event_slot_count);
+	//
+	////保存分配栈
+	//if (profiler->action_flags.save_allocation_stack) {
+	//	events = save_stack_delta (profiler, data, events, unsaved_frames);
+	//}
+	//
+	////保存类信息
+	//STORE_EVENT_ITEM_VALUE (events, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_ALLOCATION, 0, (guint64) mono_object_get_size (obj));
+	//if (profiler->action_flags.unreachable_objects || profiler->action_flags.heap_shot || profiler->action_flags.collection_summary) {
+	//	//向ProfilerPerThreadData的 heap_shot_object_buffers中保存MonoObject对象指针
+	//	STORE_ALLOCATED_OBJECT (data, obj);
+	//}
 	
-	//分配Event，若Event列表已满则将旧Event数据更新至Profiler数据结构
-	//中，并清空Event列表以供分配。
-	RESERVE_EVENTS (data, events, event_slot_count);
-	
-	//保存分配栈
-	if (profiler->action_flags.save_allocation_stack) {
-		events = save_stack_delta (profiler, data, events, unsaved_frames);
-	}
-	
-	//保存类信息
-	STORE_EVENT_ITEM_VALUE (events, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_ALLOCATION, 0, (guint64) mono_object_get_size (obj));
-	if (profiler->action_flags.unreachable_objects || profiler->action_flags.heap_shot || profiler->action_flags.collection_summary) {
-		//向ProfilerPerThreadData的 heap_shot_object_buffers中保存MonoObject对象指针
-		STORE_ALLOCATED_OBJECT (data, obj);
-	}
-	
-	if (profiler->action_flags.save_allocation_caller) {
-		MonoMethod *caller = thread_stack_top (&(data->stack));
-		gboolean caller_is_jitted = thread_stack_top_is_jitted (&(data->stack));
-		int index = 1;
-		/* In this loop it is safe to simply increment "events" because MAX_EVENT_VALUE cannot be reached. */
-		events ++;
-		
-		while ((caller != NULL) && (caller->wrapper_type == MONO_WRAPPER_MANAGED_TO_NATIVE)) {
-			caller = thread_stack_index_from_top (&(data->stack), index);
-			caller_is_jitted = thread_stack_index_from_top_is_jitted (&(data->stack), index);
-			index ++;
-		}
-		if (! caller_is_jitted) {
-			STORE_EVENT_ITEM_VALUE (events, profiler, caller, MONO_PROFILER_EVENT_DATA_TYPE_METHOD, MONO_PROFILER_EVENT_METHOD_ALLOCATION_CALLER, 0, 0);
-		} else {
-			STORE_EVENT_ITEM_VALUE (events, profiler, caller, MONO_PROFILER_EVENT_DATA_TYPE_METHOD, MONO_PROFILER_EVENT_METHOD_ALLOCATION_JIT_TIME_CALLER, 0, 0);
-		}
-	}
-	if (profiler->action_flags.allocations_carry_id) {
-		events ++;
-		STORE_EVENT_ITEM_VALUE (events, profiler, obj, MONO_PROFILER_EVENT_DATA_TYPE_OTHER, MONO_PROFILER_EVENT_ALLOCATION_OBJECT_ID, 0, 0);
-	}
-	
-	COMMIT_RESERVED_EVENTS (data);
+	//if (profiler->action_flags.save_allocation_caller) 
+	//{
+	//	MonoMethod *caller = thread_stack_top (&(data->stack));
+	//	gboolean caller_is_jitted = thread_stack_top_is_jitted (&(data->stack));
+	//	int index = 1;
+	//	/* In this loop it is safe to simply increment "events" because MAX_EVENT_VALUE cannot be reached. */
+	//	events ++;
+	//	
+	//	while ((caller != NULL) && (caller->wrapper_type == MONO_WRAPPER_MANAGED_TO_NATIVE)) {
+	//		caller = thread_stack_index_from_top (&(data->stack), index);
+	//		caller_is_jitted = thread_stack_index_from_top_is_jitted (&(data->stack), index);
+	//		index ++;
+	//	}
+	//	if (! caller_is_jitted) {
+	//		STORE_EVENT_ITEM_VALUE (events, profiler, caller, MONO_PROFILER_EVENT_DATA_TYPE_METHOD, MONO_PROFILER_EVENT_METHOD_ALLOCATION_CALLER, 0, 0);
+	//	} else {
+	//		STORE_EVENT_ITEM_VALUE (events, profiler, caller, MONO_PROFILER_EVENT_DATA_TYPE_METHOD, MONO_PROFILER_EVENT_METHOD_ALLOCATION_JIT_TIME_CALLER, 0, 0);
+	//	}
+	//}
+	//if (profiler->action_flags.allocations_carry_id) 
+	//{
+	//	events ++;
+	//	STORE_EVENT_ITEM_VALUE (events, profiler, obj, MONO_PROFILER_EVENT_DATA_TYPE_OTHER, MONO_PROFILER_EVENT_ALLOCATION_OBJECT_ID, 0, 0);
+	//}
+	//
+	//COMMIT_RESERVED_EVENTS (data);
 }
 
 static void
@@ -4804,7 +4837,8 @@ dump_current_heap_snapshot (void) {
 }
 
 static void
-profiler_heap_buffers_setup (ProfilerHeapShotHeapBuffers *heap) {
+profiler_heap_buffers_setup (ProfilerHeapShotHeapBuffers *heap) 
+{
 	heap->buffers = g_new (ProfilerHeapShotHeapBuffer, 1);
 	heap->buffers->previous = NULL;
 	heap->buffers->next = NULL;
@@ -4867,18 +4901,24 @@ report_object_references (gpointer *start, ClassIdMappingElement *layout, Profil
 }
 
 static void
-profiler_heap_report_object_reachable (ProfilerHeapShotWriteJob *job, MonoObject *obj) {
-	if (job != NULL) {
-		MonoClass *klass = mono_object_get_class (obj);
-		ClassIdMappingElement *class_id = class_id_mapping_element_get (klass);
-		if (class_id == NULL) {
+profiler_heap_report_object_reachable (ProfilerHeapShotWriteJob *job, MonoObject *obj) 
+{
+		MonoClass *klass = NULL;
+		ClassIdMappingElement *class_id = NULL;
+
+		if( NULL == job )
+			return;
+	 
+		klass = mono_object_get_class (obj);
+		class_id = class_id_mapping_element_get (klass);
+		if (class_id == NULL) 
+		{
 			printf ("profiler_heap_report_object_reachable: class %p (%s.%s) has no id\n", klass, mono_class_get_namespace (klass), mono_class_get_name (klass));
 		}
-		 
-		g_assert (class_id != NULL);
-		
+		g_assert (class_id != NULL); 
 		//更新对象总结信息
-		if (job->summary.capacity > 0) {
+		if (job->summary.capacity > 0) 
+		{
 			guint32 id = class_id->id;
 			g_assert (id < job->summary.capacity);
 			
@@ -4887,7 +4927,8 @@ profiler_heap_report_object_reachable (ProfilerHeapShotWriteJob *job, MonoObject
 			job->summary.per_class_data [id].reachable.bytes += mono_object_get_size (obj);
 		}
 
-		if (profiler->action_flags.heap_shot && job->dump_heap_data) {
+		if (profiler->action_flags.heap_shot && job->dump_heap_data) 
+		{
 			int reference_counter = 0;
 			gpointer *reference_counter_location;
 			
@@ -4896,47 +4937,54 @@ profiler_heap_report_object_reachable (ProfilerHeapShotWriteJob *job, MonoObject
 			reference_counter_location = job->cursor - 1;
 			
 			//若为数组类型
-			if (mono_class_get_rank (klass)) {
+			if (mono_class_get_rank (klass)) 
+			{
 				MonoArray *array = (MonoArray *) obj;
 				MonoClass *element_class = mono_class_get_element_class (klass);
 				ClassIdMappingElement *element_id = class_id_mapping_element_get (element_class);
 				
 				g_assert (element_id != NULL);
-				if (element_id->data.layout.slots == CLASS_LAYOUT_NOT_INITIALIZED) {
+				if (element_id->data.layout.slots == CLASS_LAYOUT_NOT_INITIALIZED) 
+				{
 					class_id_mapping_element_build_layout_bitmap (element_class, element_id);
 				}
 				//不为内置值类型
-				if (! mono_class_is_valuetype (element_class)) {
+				if (! mono_class_is_valuetype (element_class)) 
+				{
 					int length = mono_array_length (array);
 					int i;
-					for (i = 0; i < length; i++) {
+					for (i = 0; i < length; i++) 
+					{
 						MonoObject *array_element = mono_array_get (array, MonoObject*, i);
-						if ((array_element != NULL) && mono_object_is_alive (array_element)) {
+						if ((array_element != NULL) && mono_object_is_alive (array_element)) 
+						{
 							reference_counter ++;
 							WRITE_HEAP_SHOT_JOB_VALUE (job, array_element);
 						}
 					}
-				} else if (element_id->data.layout.references > 0) {
+				} else if (element_id->data.layout.references > 0) 
+				{
 					int length = mono_array_length (array);
 					int array_element_size = mono_array_element_size (klass);
 					int i;
-					for (i = 0; i < length; i++) {
+					for (i = 0; i < length; i++) 
+					{
 						gpointer array_element_address = mono_array_addr_with_size (array, array_element_size, i);
 						reference_counter += report_object_references (array_element_address, element_id, job);
 					}
 				}
 			} else {
-				if (class_id->data.layout.slots == CLASS_LAYOUT_NOT_INITIALIZED) {
+				if (class_id->data.layout.slots == CLASS_LAYOUT_NOT_INITIALIZED) 
+				{
 					class_id_mapping_element_build_layout_bitmap (klass, class_id);
 				}
-				if (class_id->data.layout.references > 0) {
+				if (class_id->data.layout.references > 0) 
+				{
 					reference_counter += report_object_references ((gpointer)(((char*)obj) + sizeof (MonoObject)), class_id, job);
 				}
 			}
-			
 			*reference_counter_location = GINT_TO_POINTER (reference_counter);
 		}
-	}
 }
 static void
 profiler_heap_report_object_unreachable (ProfilerHeapShotWriteJob *job, MonoObject *obj) {
@@ -4959,27 +5007,26 @@ profiler_heap_report_object_unreachable (ProfilerHeapShotWriteJob *job, MonoObje
 			job->summary.per_class_data [id].unreachable.instances ++;
 			job->summary.per_class_data [id].unreachable.bytes += size;
 		}
-		if (profiler->action_flags.unreachable_objects && job->dump_heap_data) {
-#if DEBUG_HEAP_PROFILER
-			printf ("profiler_heap_report_object_unreachable: at job %p writing klass %p\n", job, klass);
-#endif
-			WRITE_HEAP_SHOT_JOB_VALUE_WITH_CODE (job, klass, HEAP_CODE_FREE_OBJECT_CLASS);
-	
-#if DEBUG_HEAP_PROFILER
-			printf ("profiler_heap_report_object_unreachable: at job %p writing size %p\n", job, GUINT_TO_POINTER (size));
-#endif
+		if (profiler->action_flags.unreachable_objects && job->dump_heap_data) 
+		{ 
+			WRITE_HEAP_SHOT_JOB_VALUE_WITH_CODE (job, klass, HEAP_CODE_FREE_OBJECT_CLASS); 
 			WRITE_HEAP_SHOT_JOB_VALUE (job, GUINT_TO_POINTER (size));
 		}
 	}
 }
 
+//向堆中添加一个对象记录
 static void
-profiler_heap_add_object (ProfilerHeapShotHeapBuffers *heap, ProfilerHeapShotWriteJob *job, MonoObject *obj) {
-	if (heap->first_free_slot >= heap->current->end_slot) {
-		if (heap->current->next != NULL) {
+profiler_heap_add_object (ProfilerHeapShotHeapBuffers *heap, MonoObject *obj) 
+{ 
+	//最后一个槽位不使用
+	if (heap->first_free_slot >= heap->current->end_slot) 
+	{
+		if (heap->current->next != NULL) 
+		{
 			heap->current = heap->current->next;
 		} else {
-			ProfilerHeapShotHeapBuffer *buffer = g_new (ProfilerHeapShotHeapBuffer, 1);
+			ProfilerHeapShotHeapBuffer *buffer = g_new0(ProfilerHeapShotHeapBuffer, 1);
 			buffer->previous = heap->last;
 			buffer->next = NULL;
 			buffer->start_slot = &(buffer->buffer [0]);
@@ -4991,19 +5038,24 @@ profiler_heap_add_object (ProfilerHeapShotHeapBuffers *heap, ProfilerHeapShotWri
 		heap->first_free_slot = &(heap->current->buffer [0]);
 	}
 	
-	*(heap->first_free_slot) = obj;
+	heap->first_free_slot->obj = obj;
 	heap->first_free_slot ++;
-	profiler_heap_report_object_reachable (job, obj);
 }
 
 //此函数从对象链表队尾弹出已死亡的对象，若发现在current_slot前还有存活对象
 //则返回此存活对象以覆盖待删除的current_slot对象。
-static MonoObject*
-profiler_heap_pop_object_from_end (ProfilerHeapShotHeapBuffers *heap, ProfilerHeapShotWriteJob *job, MonoObject** current_slot) {
-	while (heap->first_free_slot != current_slot) {
-		MonoObject* obj;
-		
-		if (heap->first_free_slot > heap->current->start_slot) {
+static ProfilerHeapObjectInfo
+profiler_heap_pop_object_from_end (ProfilerHeapShotHeapBuffers *heap,  ProfilerHeapObjectInfo* current_slot) 
+{
+	ProfilerHeapObjectInfo objinfo;
+	ProfilerHeapObjectInfo null_obj_info;
+	null_obj_info.obj = 0;
+	null_obj_info.alive = 0;
+
+	while (heap->first_free_slot != current_slot) 
+	{ 
+		if (heap->first_free_slot > heap->current->start_slot) 
+		{
 			heap->first_free_slot --;
 		} else {
 			heap->current = heap->current->previous;
@@ -5011,42 +5063,38 @@ profiler_heap_pop_object_from_end (ProfilerHeapShotHeapBuffers *heap, ProfilerHe
 			heap->first_free_slot = heap->current->end_slot - 1;
 		}
 		
-		obj = *(heap->first_free_slot);
-		
-		if (mono_object_is_alive (obj)) {
-			profiler_heap_report_object_reachable (job, obj);
-			return obj;
-		} else {
-			profiler_heap_report_object_unreachable (job, obj);
+		objinfo = *(heap->first_free_slot); 
+		if ( objinfo.alive ) 
+		{
+			return objinfo;
 		}
 	}
-	return NULL;
+	return null_obj_info;
 }
 
 static void
-profiler_heap_scan (ProfilerHeapShotHeapBuffers *heap, ProfilerHeapShotWriteJob *job) {
+profiler_heap_scan (ProfilerHeapShotHeapBuffers *heap) 
+{
 	ProfilerHeapShotHeapBuffer *current_buffer = heap->buffers;
-	MonoObject** current_slot = current_buffer->start_slot;
+	ProfilerHeapObjectInfo* current_slot = current_buffer->start_slot;
 	
 	//对Profiler记录的堆中的所有对象，查看其是否还活着
-	while (current_slot != heap->first_free_slot) {
-		MonoObject *obj = *current_slot;
-		if (mono_object_is_alive (obj)) {
-			profiler_heap_report_object_reachable (job, obj);
-		} else {
-			profiler_heap_report_object_unreachable (job, obj);
-			//从当前对缓存中删除不可达对象。
-			*current_slot = profiler_heap_pop_object_from_end (heap, job, current_slot);
+	while (current_slot != heap->first_free_slot) 
+	{
+		ProfilerHeapObjectInfo obj_info = *current_slot;
+		if (mono_object_is_alive (obj_info.obj)) 
+		{
+			(*current_slot).alive = 1;
+		} else { 
+			(*current_slot).alive = 0; 
 		}
-		
-		if (*current_slot != NULL) {
-			current_slot ++;
-			
-			if (current_slot == current_buffer->end_slot) {
-				current_buffer = current_buffer->next;
-				g_assert (current_buffer != NULL);
-				current_slot = current_buffer->start_slot;
-			}
+
+		current_slot ++;	
+		if (current_slot == current_buffer->end_slot) 
+		{
+			current_buffer = current_buffer->next;
+			g_assert (current_buffer != NULL);
+			current_slot = current_buffer->start_slot;
 		}
 	}
 }
@@ -5063,39 +5111,28 @@ process_gc_event (MonoProfiler *profiler, gboolean do_heap_profiling, MonoGCEven
 	
 	switch (ev) {
 	case MONO_GC_EVENT_PRE_STOP_WORLD:
-		break;
-		// Get the lock, so we are sure nobody is flushing events during the collection,
-		// and we can update all mappings (building the class descriptors).
-		// This is necessary also during lock profiling (even if do_heap_profiling is FALSE).
-		LOCK_PROFILER ();
-		break;
-	case MONO_GC_EVENT_POST_STOP_WORLD:
-		break;
-		if (do_heap_profiling) {
-			dump_heap_data = dump_current_heap_snapshot ();
-			if (heap_shot_write_job_should_be_created (dump_heap_data)) {
-				ProfilerPerThreadData *data;
-				// Update all mappings, so that we have built all the class descriptors.
-				flush_all_mappings ();
-				// Also write all event buffers, so that allocations are recorded.
-				for (data = profiler->per_thread_data; data != NULL; data = data->next) {
-					write_thread_data_block (data);
-				}
-			}
-		} else {
-			dump_heap_data = FALSE;
-		}
-		// Release lock...
-		UNLOCK_PROFILER ();
-		break;
-	case MONO_GC_EVENT_MARK_END: {//GC标记结束阶段
+		//此时所有托管线程尚未停止
 		LOCK_PROFILER();
-		if (do_heap_profiling) {
-			take_a_heap_snapshot();
-		}
-		UNLOCK_PROFILER();
+		 
 		break;
-	}//end of case MONO_GC_EVENT_MARK_END: {
+	case MONO_GC_EVENT_POST_STOP_WORLD: 
+		break;
+		 
+	case MONO_GC_EVENT_MARK_END:   
+		//此阶段Profiler内不可有任何内存分配行为，否则在托管
+		//多线程环境下造成死锁 
+		//此阶段只标记已在记录缓存中的对象
+		profiler_heap_scan( &(profiler->heap) );
+		break; 
+
+
+	case MONO_GC_EVENT_PRE_START_WORLD:
+		break;
+	case MONO_GC_EVENT_POST_START_WORLD:
+		save_heapshot();
+		//TODO:此处进行类信息与对象信息文件写入 
+		UNLOCK_PROFILER();
+		break; 
 	default:
 		break;
 	}
@@ -5129,70 +5166,98 @@ is_heap_snapshot_request(void)
 }
 
 static void 
-take_a_heap_snapshot(void)
+clear_dead_objects_from_heap( void )
+{
+	ProfilerHeapShotHeapBuffer *current_buffer = NULL;
+	ProfilerHeapObjectInfo* current_slot = NULL;
+
+	current_buffer = profiler->heap.buffers;
+	current_slot = current_buffer->start_slot;
+
+	while (current_slot != profiler->heap.first_free_slot) 
+	{ 
+		if ( (*current_slot).alive == 0 ) 
+		{ 
+			*current_slot = profiler_heap_pop_object_from_end( &(profiler->heap) , current_slot );
+		} 
+
+		if( current_slot->obj != NULL )
+		{ 
+			current_slot ++;	
+			if (current_slot == current_buffer->end_slot) 
+			{
+				current_buffer = current_buffer->next;
+				g_assert (current_buffer != NULL);
+				current_slot = current_buffer->start_slot;
+			}
+		}
+	}
+}
+
+
+static void 
+save_heapshot(void)
 {
 	ProfilerHeapShotWriteJob *job = NULL;
 	ProfilerPerThreadData *data = NULL;
 	ProfilerStatisticalData *statistical_data = NULL;
-	 
-	flush_all_mappings ();  
+
+	ProfilerHeapShotHeapBuffer *current_buffer = NULL;
+	ProfilerHeapObjectInfo* current_slot = NULL;
+	
+	//由于已经将类信息在Alloced 函数写入主Profiler
+	//类记录表，当前直接将其写入文件即可
+	write_mapping_block(0);
 	 
 	if(is_heap_snapshot_request()) 
 	{ 
 		job = profiler_heap_shot_write_job_new(profiler->heap_shot_was_requested, TRUE, profiler->garbage_collection_counter);
-		profiler->heap_shot_was_requested = FALSE;
-		MONO_PROFILER_GET_CURRENT_COUNTER(job->start_counter);
-		MONO_PROFILER_GET_CURRENT_TIME(job->start_time);
-	}
 
-	//扫描主profiler结构已经记录的堆对象，从中剔除已经不存在的对象
-	//并向job汇报依然存活的对象
-	profiler_heap_scan(&(profiler->heap), job);
+		if( job )
+		{ 
+			profiler->heap_shot_was_requested = FALSE;
+			MONO_PROFILER_GET_CURRENT_COUNTER(job->start_counter);
+			MONO_PROFILER_GET_CURRENT_TIME(job->start_time);
 
-	//对所有线程私有记录数据，扫描其堆对象记录若有新的存活对象，若有则加入主
-	//profiler结构的堆记录缓冲中，若没有则向job汇报不可达对象。
-	for (data = profiler->per_thread_data; data != NULL; data = data->next) {
-		ProfilerHeapShotObjectBuffer *buffer;
-		for (buffer = data->heap_shot_object_buffers; buffer != NULL; buffer = buffer->next) {
-			MonoObject **cursor;
-			for (cursor = buffer->first_unprocessed_slot; cursor < buffer->next_free_slot; cursor++) {
-				MonoObject *obj = *cursor;
+			current_buffer = profiler->heap.buffers;
+			current_slot = current_buffer->start_slot;
+			 
+			while (current_slot != profiler->heap.first_free_slot) 
+			{ 
+				if ( (*current_slot).alive ) 
+				{
+					profiler_heap_report_object_reachable( job , (*current_slot).obj );
+				} else { 
+					profiler_heap_report_object_unreachable( job , (*current_slot).obj );
+					*current_slot = profiler_heap_pop_object_from_end( &(profiler->heap) , current_slot );
+				} 
 
-				if (mono_object_is_alive(obj)) {
-					profiler_heap_add_object(&(profiler->heap), job, obj);
-				}
-				else {
-					profiler_heap_report_object_unreachable(job, obj);
+				if( current_slot->obj != NULL )
+				{ 
+					current_slot ++;	
+					if (current_slot == current_buffer->end_slot) 
+					{
+						current_buffer = current_buffer->next;
+						g_assert (current_buffer != NULL);
+						current_slot = current_buffer->start_slot;
+					}
 				}
 			}
-			buffer->first_unprocessed_slot = cursor;
+
+
+			MONO_PROFILER_GET_CURRENT_COUNTER(job->end_counter);
+			MONO_PROFILER_GET_CURRENT_TIME(job->end_time);
+
+			profiler_add_heap_shot_write_job(job);
+			profiler_free_heap_shot_write_jobs();   
+			profiler_process_heap_shot_write_jobs ();
+			flush_everything();
 		}
+	} else{
+
+		clear_dead_objects_from_heap();
 	}
-	 
-
-	if( job )
-	{ 
-		MONO_PROFILER_GET_CURRENT_COUNTER(job->end_counter);
-		MONO_PROFILER_GET_CURRENT_TIME(job->end_time);
-
-		profiler_add_heap_shot_write_job(job);
-		profiler_free_heap_shot_write_jobs();  
-
-		//
-		statistical_data = profiler->statistical_data_ready;
-		if (statistical_data != NULL) 
-		{
-			LOG_WRITER_THREAD ("data_writer_thread: writing statistical data...");
-			profiler->statistical_data_ready = NULL;
-			write_statistical_data_block (statistical_data);
-			statistical_data->next_free_index = 0;
-			statistical_data->first_unwritten_index = 0;
-			profiler->statistical_data_second_buffer = statistical_data;
-			LOG_WRITER_THREAD ("data_writer_thread: wrote statistical data");
-		} 
-		profiler_process_heap_shot_write_jobs ();
-		flush_everything();
-	}
+ 
 
 }
 
@@ -5206,24 +5271,8 @@ gc_event (MonoProfiler *profiler, MonoGCEvent ev, int generation) {
 	if (ev == MONO_GC_EVENT_START) {
 		profiler->garbage_collection_counter ++;
 	}
-	
-	event_value = (profiler->garbage_collection_counter << 8) | generation;
-	
-	if (ev == MONO_GC_EVENT_POST_STOP_WORLD) {
-		process_gc_event (profiler, do_heap_profiling, ev);
-	}
-	
-	/* Check if the gc event should be recorded. */
-	if (profiler->action_flags.report_gc_events || do_heap_profiling) {
-		GET_PROFILER_THREAD_DATA (data);
-		GET_NEXT_FREE_EVENT (data, event);
-		STORE_EVENT_NUMBER_COUNTER (event, profiler, event_value, MONO_PROFILER_EVENT_DATA_TYPE_OTHER, gc_event_code_from_profiler_event (ev), gc_event_kind_from_profiler_event (ev));
-		COMMIT_RESERVED_EVENTS (data);
-	}
-	
-	if (ev != MONO_GC_EVENT_POST_STOP_WORLD) {
-		process_gc_event (profiler, do_heap_profiling, ev);
-	}
+	 
+	process_gc_event (profiler, do_heap_profiling, ev);  
 }
 
 static void
@@ -5961,32 +6010,32 @@ mono_profiler_startup (const char *desc)
 	
 	mono_profiler_install (profiler, profiler_shutdown);
 	
-	mono_profiler_install_appdomain (appdomain_start_load, appdomain_end_load,
-			appdomain_start_unload, appdomain_end_unload);
+	//mono_profiler_install_appdomain (appdomain_start_load, appdomain_end_load,
+	//		appdomain_start_unload, appdomain_end_unload);
 	mono_profiler_install_assembly (assembly_start_load, assembly_end_load,
 			assembly_start_unload, assembly_end_unload);
-	mono_profiler_install_module (module_start_load, module_end_load,
-			module_start_unload, module_end_unload);
+	//mono_profiler_install_module (module_start_load, module_end_load,
+	//		module_start_unload, module_end_unload);
 	mono_profiler_install_class (class_start_load, class_end_load,
 			class_start_unload, class_end_unload);
-	mono_profiler_install_jit_compile (method_start_jit, method_end_jit);
-	mono_profiler_install_enter_leave (method_enter, method_leave);
-	mono_profiler_install_method_free (method_free);
-	mono_profiler_install_thread (thread_start, thread_end);
+	//mono_profiler_install_jit_compile (method_start_jit, method_end_jit);
+	//mono_profiler_install_enter_leave (method_enter, method_leave);
+	//mono_profiler_install_method_free (method_free);
+	//mono_profiler_install_thread (thread_start, thread_end);
 	mono_profiler_install_allocation (object_allocated);
-	mono_profiler_install_monitor (monitor_event);
-	mono_profiler_install_statistical (statistical_hit);
-	mono_profiler_install_statistical_call_chain (statistical_call_chain, profiler->statistical_call_chain_depth, MONO_PROFILER_CALL_CHAIN_MANAGED);
+	//mono_profiler_install_monitor (monitor_event);
+	//mono_profiler_install_statistical (statistical_hit);
+	//mono_profiler_install_statistical_call_chain (statistical_call_chain, profiler->statistical_call_chain_depth, MONO_PROFILER_CALL_CHAIN_MANAGED);
 	mono_profiler_install_gc (gc_event, gc_resize);
 	mono_profiler_install_runtime_initialized (runtime_initialized);
 #if (HAS_OPROFILE)
 	mono_profiler_install_jit_end (method_jit_result);
 #endif
-	if (profiler->flags | MONO_PROFILE_STATISTICAL) {
-		mono_profiler_install_code_chunk_new (profiler_code_chunk_new_callback);
-		mono_profiler_install_code_chunk_destroy (profiler_code_chunk_destroy_callback);
-		mono_profiler_install_code_buffer_new (profiler_code_buffer_new_callback);
-	}
+	//if (profiler->flags | MONO_PROFILE_STATISTICAL) {
+	//	mono_profiler_install_code_chunk_new (profiler_code_chunk_new_callback);
+	//	mono_profiler_install_code_chunk_destroy (profiler_code_chunk_destroy_callback);
+	//	mono_profiler_install_code_buffer_new (profiler_code_buffer_new_callback);
+	//}
 	
 	mono_profiler_set_events (profiler->flags);
 }
