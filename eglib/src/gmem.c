@@ -28,14 +28,110 @@
 #include <stdio.h>
 #include <string.h>
 #include <glib.h>
+#include <windows.h>
 
+
+/*
+===================================
+			Profiler内部使用的内存分配函数
+===================================
+*/
+
+ typedef struct 
+ {
+	size_t size;
+}mem_block_header_t;
+
+  void* profiler_malloc( size_t size );
+  void profiler_free( void* ptr );
+  size_t profiler_memsize( void* ptr );
+  void* profiler_malloc0( size_t size );
+  void* profiler_calloc( size_t nmemb, size_t size );
+  void* profiler_realloc( void *ptr, size_t size );
+ 
  static MonoMemoryCallbacks memory_callbacks =
 	{
-		malloc,
-		free,
-		calloc,
-		realloc
+		profiler_malloc,
+		profiler_free,
+		profiler_calloc,
+		profiler_realloc
 	};
+
+ void* profiler_malloc( size_t size )
+ {
+	 size_t final_block_size = 0;  
+	 mem_block_header_t* pblock = 0;
+	 DWORD alloc_err = 0;
+	 final_block_size = sizeof(mem_block_header_t) + size;
+	 pblock = (mem_block_header_t*)VirtualAlloc( NULL , final_block_size , MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
+	 if( pblock )
+	 {
+		pblock->size = final_block_size;
+		return (((unsigned char*)(pblock))+sizeof(mem_block_header_t));
+	 }else{
+		 alloc_err = GetLastError();
+		 alloc_err++;
+	 }
+	 return NULL;
+ }
+
+ void profiler_free( void* ptr )
+ {
+	 unsigned char* pblock = 0;
+	 if( ptr == 0 )
+		 return;
+	 pblock = (((unsigned char*)ptr)-sizeof(mem_block_header_t));
+	 VirtualFree(pblock , 0 , MEM_RELEASE);
+ }
+
+ size_t profiler_memsize( void* ptr )
+ {
+	 unsigned char* pblock = (((unsigned char*)ptr)-sizeof(mem_block_header_t));
+	 size_t size =  (((mem_block_header_t*)pblock)->size) - sizeof(mem_block_header_t);
+	 return size;
+ }
+
+ void* profiler_malloc0( size_t size )
+ {
+	 void* pbuf =  profiler_malloc(size);
+	 if( pbuf )
+	 {
+		 memset( pbuf , 0 , size);
+	 }
+	 return pbuf;
+ }
+
+ void* profiler_calloc( size_t nmemb, size_t size )
+ {
+	 void* pbuf = profiler_malloc0( nmemb * size );
+	 return pbuf;
+ }
+
+ void* profiler_realloc( void *ptr, size_t size )
+ {
+	 void* pbuf  = NULL;
+	 size_t oldsize = 0;
+	 if( ptr == NULL )
+	 {
+		 return profiler_malloc(size);
+	 }
+
+	 //获得旧有内存大小
+	 oldsize = profiler_memsize(ptr);
+	 if( oldsize >= size )
+	 {
+		 return ptr;
+	 }
+	
+	 pbuf = profiler_malloc(size);
+	 if( pbuf )
+	 { 
+		 memcpy( pbuf , ptr , oldsize );
+		 profiler_free(ptr);
+		 ptr = NULL;
+	 }
+	 return pbuf;
+ }
 
 void g_mem_set_callbacks (MonoMemoryCallbacks* callbacks)
 {

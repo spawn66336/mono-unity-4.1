@@ -500,8 +500,14 @@ GC_stop_func stop_func;
 #   if defined(REGISTER_LIBRARIES_EARLY)
         GC_cond_register_dynamic_libraries();
 #   endif
+	if (GC_notify_event)
+		GC_notify_event (GC_EVENT_PRE_STOP_WORLD);
+
     STOP_WORLD();
     IF_THREADS(GC_world_stopped = TRUE);
+
+	if (GC_notify_event)
+		GC_notify_event (GC_EVENT_POST_STOP_WORLD);
 	
 	if (GC_notify_event)
 		GC_notify_event (GC_EVENT_MARK_START);
@@ -523,8 +529,8 @@ GC_stop_func stop_func;
 
     /* Mark from all roots.  */
         /* Minimize junk left in my registers and on the stack */
-            GC_clear_a_few_frames();
-            GC_noop(0,0,0,0,0,0);
+    GC_clear_a_few_frames();
+    GC_noop(0,0,0,0,0,0);
 	GC_initiate_gc();
 	for(i = 0;;i++) {
 	    if ((*stop_func)()) {
@@ -536,8 +542,13 @@ GC_stop_func stop_func;
 		      }
 #		    endif
 		    GC_deficit = i; /* Give the mutator a chance. */
+
+			if (GC_notify_event)
+				GC_notify_event (GC_EVENT_PRE_START_WORLD);
                     IF_THREADS(GC_world_stopped = FALSE);
 	            START_WORLD();
+			if (GC_notify_event)
+					GC_notify_event (GC_EVENT_POST_START_WORLD);
 	            return(FALSE);
 	    }
 	    if (GC_mark_some((ptr_t)(&dummy))) break;
@@ -569,13 +580,18 @@ GC_stop_func stop_func;
         if (GC_debugging_started) {
             (*GC_check_heap)();
         }
-    
-
+     
 	if (GC_notify_event)
 		GC_notify_event (GC_EVENT_MARK_END);
 	
+	if (GC_notify_event)
+		GC_notify_event (GC_EVENT_PRE_START_WORLD);
     IF_THREADS(GC_world_stopped = FALSE);
-    START_WORLD();
+    START_WORLD(); 
+	if (GC_notify_event)
+		GC_notify_event (GC_EVENT_POST_START_WORLD);
+
+
 #   ifdef PRINTTIMES
 	GET_TIME(current_time);
 	GC_printf1("World-stopped marking took %lu msecs\n",

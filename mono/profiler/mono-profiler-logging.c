@@ -5063,12 +5063,14 @@ process_gc_event (MonoProfiler *profiler, gboolean do_heap_profiling, MonoGCEven
 	
 	switch (ev) {
 	case MONO_GC_EVENT_PRE_STOP_WORLD:
+		break;
 		// Get the lock, so we are sure nobody is flushing events during the collection,
 		// and we can update all mappings (building the class descriptors).
 		// This is necessary also during lock profiling (even if do_heap_profiling is FALSE).
 		LOCK_PROFILER ();
 		break;
 	case MONO_GC_EVENT_POST_STOP_WORLD:
+		break;
 		if (do_heap_profiling) {
 			dump_heap_data = dump_current_heap_snapshot ();
 			if (heap_shot_write_job_should_be_created (dump_heap_data)) {

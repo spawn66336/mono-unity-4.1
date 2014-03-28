@@ -702,12 +702,23 @@ mono_profiler_appdomain_loaded (MonoDomain *domain, int result)
 
 void 
 mono_profiler_shutdown (void)
-{
-	ProfilerDesc *prof;
-	for (prof = prof_list; prof; prof = prof->next) {
+{ 
+	ProfilerDesc *prof = NULL;
+	ProfilerDesc *nextprof = NULL;
+
+	for (prof = prof_list; prof; ) {
+		nextprof = prof->next;
 		if (prof->shutdown_callback)
+		{
 			prof->shutdown_callback (prof->profiler);
+			//Õª³ýProfilerDesc½á¹¹
+			g_free(prof);
+			prof = NULL;
+			prof_list = nextprof;
+		}
+		prof = nextprof;
 	}
+	prof_list = NULL;
 }
 
 void

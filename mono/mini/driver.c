@@ -1582,8 +1582,8 @@ mono_main (int argc, char* argv[])
 	//»Ù∆Ù∂Øprofile
 	if (enable_profile)
 	{
-		//mono_profiler_load (profile_options);
-		mono_profiler_logging_load( profile_options );
+		mono_profiler_load (profile_options);
+		//mono_profiler_logging_load( profile_options );
 	}
 	mono_attach_parse_options (attach_options);
 
