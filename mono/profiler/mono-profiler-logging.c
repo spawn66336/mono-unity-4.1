@@ -1274,11 +1274,15 @@ class_id_mapping_element_new (MonoClass *klass) {
 //尝试向profiler类注册表里加入指定类
 static void
 try_insert_class_id_mapping_element( MonoClass* klass )
-{
+{ 
 	ClassIdMappingElement *element = class_id_mapping_element_get (klass);
 	if (element == NULL) 
 	{ 
 		class_id_mapping_element_new (klass);
+	}else{
+		//若已经在查找表中存在，且重新载入有可能类中的成员有变故需重新
+		//计算类布局
+		element->data.layout.slots = CLASS_LAYOUT_NOT_INITIALIZED;
 	}
 }
 
@@ -4427,7 +4431,7 @@ class_end_unload (MonoProfiler *profiler, MonoClass *klass)
 {
 	ProfilerPerThreadData *data;
 	ProfilerEventData *event;
-
+	 
 	//GET_PROFILER_THREAD_DATA (data);
 	//GET_NEXT_FREE_EVENT (data, event);
 	//STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_UNLOAD, MONO_PROFILER_EVENT_KIND_END);
