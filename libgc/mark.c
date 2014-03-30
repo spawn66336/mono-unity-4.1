@@ -203,9 +203,8 @@ GC_bool GC_is_marked(p)
 ptr_t p;
 {
     register struct hblk *h = HBLKPTR(p);
-    register hdr * hhdr = HDR(h);
-    register int word_no = (word *)p - (word *)h;
-    
+    register hdr * hhdr = HDR(h); 
+    register int word_no = (word *)p - (word *)h; 
     return(mark_bit_from_hdr(hhdr, word_no));
 }
 

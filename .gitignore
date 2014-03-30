@@ -198,3 +198,8 @@ FakesAssemblies/
 *.exp
 *.idb
 *.bsc
+builds/embedruntimes/win32/libmono.bsc
+msvc/Win32_Debug_eglib/lib/MonoPosixHelper.exp
+msvc/Win32_Debug_eglib/lib/libmono.exp
+msvc/Win32_Debug_eglib/lib/libtest.exp
+msvc/Win32_Debug_eglib/lib/vc80.idb
