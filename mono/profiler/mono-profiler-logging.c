@@ -299,6 +299,7 @@ typedef struct _MonoProfilerClassData {
 	} layout;
 	int refs_count; //预计算出的引用数量
 	int assembly_id; //用来比对类是否相同
+	int alive;			//类是否还可用，在assembly释放时会被标记为false
 } MonoProfilerClassData;
 
 typedef struct _MonoProfilerMethodData {
@@ -400,6 +401,7 @@ typedef struct _ProfilerHeapShotObjectBuffer {
 typedef struct _ProfilerHeapObjectInfo
 {
 	MonoObject* obj;	//对象地址
+	MonoDomain *	 domain; //对象所属domain
 	int			size;   //对象大小
 	int			alive;	//对象是否存活
 	MonoClass*	klass;	//对象类地址
@@ -1331,6 +1333,7 @@ class_id_mapping_element_new (MonoClass *klass) {
 
 	
 	result->data.assembly_id = assembly_id;
+	result->data.alive = 1;
 	result->data.bitmap.compact = 0;
 	result->data.bitmap.extended = 0;
 	result->data.layout.slots = CLASS_LAYOUT_NOT_INITIALIZED;
@@ -1361,7 +1364,8 @@ try_insert_class_id_mapping_element( MonoClass* klass )
 		MonoAssembly *assembly = mono_image_get_assembly (image);
 		guint32 assembly_id = loaded_element_get_id (profiler->loaded_assemblies, assembly);
 		//表中类已经过期!
-		if( element->data.assembly_id != assembly_id )
+		if( element->data.assembly_id != assembly_id || 
+			element->data.alive )
 		{
 			//重置名称
 			if( element->name )
@@ -1390,6 +1394,8 @@ try_insert_class_id_mapping_element( MonoClass* klass )
 			}
 			element->data.layout.slots = CLASS_LAYOUT_NOT_INITIALIZED;
 			element->data.layout.references = CLASS_LAYOUT_NOT_INITIALIZED;
+			element->data.alive =1;
+
 			element->next_unwritten = profiler->classes->unwritten;
 			profiler->classes->unwritten = element;
 			element->id = profiler->classes->next_id;
@@ -1630,8 +1636,6 @@ test_class_layout_ready_cb(gpointer key, gpointer value, gpointer user_data)
 	int* need_build_again = user_data;
 	ClassIdMappingElement *class_elem = value;  
 
-
-
 	if( class_elem->data.layout.slots == CLASS_LAYOUT_NOT_INITIALIZED )
 	{
 		*need_build_again = 1;
@@ -1649,6 +1653,22 @@ build_all_class_id_mapping_element_layout_bitmap()
 		need_build_again = 0;
 		g_hash_table_foreach(profiler->classes->table, test_class_layout_ready_cb, &need_build_again); 
 	}
+}
+
+void mark_all_unload_assembly_class_dead_cb(gpointer key, gpointer value, gpointer user_data)
+{
+	int assembly_id = *((int*)user_data);
+	ClassIdMappingElement *class_elem = value;  
+	if( class_elem->data.assembly_id == assembly_id )
+	{
+		class_elem->data.alive = 0;
+	}
+}
+
+static void
+mark_all_unload_assembly_class_dead( int assembly_id )
+{
+	g_hash_table_foreach(profiler->classes->table, mark_all_unload_assembly_class_dead_cb, &assembly_id); 
 }
 
 //查询某类对象的最大引用数量
@@ -4421,7 +4441,9 @@ static void
 assembly_end_unload (MonoProfiler *profiler, MonoAssembly *assembly) {
 	LoadedElement *element; 
 	LOCK_PROFILER ();
+	
 	element = loaded_element_unload_end (profiler->loaded_assemblies, assembly);
+	mark_all_unload_assembly_class_dead( element->id );
 	//write_element_unload_block (element, MONO_PROFILER_LOADED_EVENT_ASSEMBLY, CURRENT_THREAD_ID ());
 	UNLOCK_PROFILER ();
 }
@@ -4807,12 +4829,7 @@ static void profiler_heap_add_object (ProfilerHeapShotHeapBuffers *heap, MonoObj
 static void
 object_allocated (MonoProfiler *profiler, MonoObject *obj, MonoClass *klass) 
 {
-	LOCK_PROFILER();
-	if( strstr(klass->name,"VCTask") )
-	{
-		int i = 3;
-		i = 4;
-	}
+	LOCK_PROFILER(); 
 	profiler_heap_add_object( &(profiler->heap) , obj );  
 	UNLOCK_PROFILER(); 
 	//ProfilerPerThreadData *data;
@@ -5326,6 +5343,7 @@ profiler_heap_report_object_unreachable(ProfilerHeapShotWriteJob *job, ProfilerH
 static void
 profiler_heap_add_object (ProfilerHeapShotHeapBuffers *heap, MonoObject *obj) 
 { 
+	LoadedElement *appdomain_elem = NULL;
 	//最后一个槽位不使用
 	if (heap->first_free_slot >= heap->current->end_slot) 
 	{
@@ -5350,7 +5368,8 @@ profiler_heap_add_object (ProfilerHeapShotHeapBuffers *heap, MonoObject *obj)
 	//初始化对象信息
 	heap->first_free_slot->obj = obj;
 	heap->first_free_slot->klass = obj->vtable->klass;
-	heap->first_free_slot->size = mono_object_get_size(obj);
+	heap->first_free_slot->size = mono_object_get_size(obj); 
+	heap->first_free_slot->domain = obj->vtable->domain ;
 	heap->first_free_slot->ref_start_indx = 0;
 	heap->first_free_slot->refs_count = 0;
 	heap->first_free_slot ++;
@@ -5399,11 +5418,21 @@ profiler_heap_scan (ProfilerHeapShotHeapBuffers *heap)
 
 		if (mono_object_is_alive(current_slot->obj))
 		{
-			(*current_slot).alive = 1;
-			//记录此对象的所有引用
-			current_slot->ref_start_indx = profiler->references_count;
-			//若有构造函数才可统计其refs
-			current_slot->refs_count = record_object_references(current_slot);
+			ClassIdMappingElement* class_id = (ClassIdMappingElement*)class_id_mapping_element_get( current_slot->klass );
+			LoadedElement* domain_elem = (LoadedElement*)g_hash_table_lookup(profiler->loaded_appdomains , current_slot->domain );
+			 
+			if( !(domain_elem->unloaded) && 
+				class_id && 
+				class_id->data.alive  )
+			{ 
+				(*current_slot).alive = 1;
+				//记录此对象的所有引用
+				current_slot->ref_start_indx = profiler->references_count;
+				//若有构造函数才可统计其refs
+				current_slot->refs_count = record_object_references(current_slot);
+			}else{
+				(*current_slot).alive = 0;
+			}
 		} else { 
 			(*current_slot).alive = 0; 
 		}
