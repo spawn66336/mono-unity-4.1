@@ -1346,65 +1346,7 @@ class_id_mapping_element_new (MonoClass *klass) {
 }
 
 
-static void write_mapping_block (gsize thread_id);
 
-//尝试向profiler类注册表里加入指定类
-static void
-try_insert_class_id_mapping_element( MonoClass* klass )
-{ 
-	ClassIdMappingElement *element = class_id_mapping_element_get (klass);
-	if (element == NULL) 
-	{ 
-		class_id_mapping_element_new (klass);
-	}else{//此处需要验证新加入的类是否与已存在的类相同
-		//若已经在查找表中存在，且重新载入有可能类中的成员有变故需重新
-		//计算类布局
-
-		MonoImage *image = mono_class_get_image (klass);
-		MonoAssembly *assembly = mono_image_get_assembly (image);
-		guint32 assembly_id = loaded_element_get_id (profiler->loaded_assemblies, assembly);
-		//表中类已经过期!
-		if( element->data.assembly_id != assembly_id || 
-			element->data.alive )
-		{
-			//重置名称
-			if( element->name )
-			{
-				g_free( element->name );
-				element->name = NULL;
-			}
-
-			element->name = mono_type_full_name (mono_class_get_type (klass)); 
-			//若类型名为空则使用类名作为类型名
-			if(!strcmp(element->name,""))
-			{ 
-				GString *class_name = NULL;
-				g_free(element->name);
-				element->name = NULL;
-				class_name = g_string_new ("");
-				append_class_name (class_name, klass, TRUE);
-				element->name = g_string_free (class_name, FALSE);
-			}
-			element->data.assembly_id = assembly_id;
-			element->data.bitmap.compact = 0;
-			if( element->data.bitmap.extended )
-			{
-				g_free( element->data.bitmap.extended );
-				element->data.bitmap.extended = 0;
-			}
-			element->data.layout.slots = CLASS_LAYOUT_NOT_INITIALIZED;
-			element->data.layout.references = CLASS_LAYOUT_NOT_INITIALIZED;
-			element->data.alive =1;
-
-			element->next_unwritten = profiler->classes->unwritten;
-			profiler->classes->unwritten = element;
-			element->id = profiler->classes->next_id;
-			profiler->classes->next_id ++;
-			write_mapping_block(0); 
-		} 
-		
-	}
-}
 
 static void
 class_id_mapping_element_build_layout_bitmap (MonoClass *klass, ClassIdMappingElement *klass_id) {
@@ -1588,71 +1530,102 @@ class_id_mapping_element_build_layout_bitmap (MonoClass *klass, ClassIdMappingEl
 
 }
 
-void 
-build_class_layout_bitmap_cb(gpointer key, gpointer value, gpointer user_data)
+//调用此函数前Class的layout必须构建完成
+void
+class_id_mapping_element_build_refs(ClassIdMappingElement * class_id )
 {
 	int references = 0;
-	int slot;
-	ClassIdMappingElement *class_elem = value; 
-	MonoClass* klass = key;
-	if( class_elem->data.layout.slots != CLASS_LAYOUT_NOT_INITIALIZED )
-		return;
- 
+	int slot = 0; 
+	MonoClass* klass = class_id->klass;
 
-	class_id_mapping_element_build_layout_bitmap(key, class_elem);
-	
+	if( class_id->data.layout.slots == CLASS_LAYOUT_NOT_INITIALIZED )
+		return;
+
 	//统计此类所有引用
-	for (slot = 0; slot < class_elem->data.layout.slots; slot++) 
+	for (slot = 0; slot < class_id->data.layout.slots; slot++) 
 	{
 		gboolean slot_has_reference;
-		if (class_elem->data.layout.slots <= CLASS_LAYOUT_PACKED_BITMAP_SIZE) {
-			if (class_elem->data.bitmap.compact & (((guint64)1) << slot)) {
+		if (class_id->data.layout.slots <= CLASS_LAYOUT_PACKED_BITMAP_SIZE) {
+			if (class_id->data.bitmap.compact & (((guint64)1) << slot)) {
 				slot_has_reference = TRUE;
-			}
-			else {
+			} else {
 				slot_has_reference = FALSE;
 			}
-		}
-		else {
-			if (class_elem->data.bitmap.extended[slot >> 3] & (1 << (slot & 7))) {
+		} else {
+			if (class_id->data.bitmap.extended[slot >> 3] & (1 << (slot & 7))) {
 				slot_has_reference = TRUE;
-			}
-			else {
+			} else {
 				slot_has_reference = FALSE;
 			}
-		}
-
+		} 
 		if (slot_has_reference)
 		{ 
 			references++; 
 		}
 	}
-	class_elem->data.refs_count = references;
+	class_id->data.refs_count = references;
 }
 
-void 
-test_class_layout_ready_cb(gpointer key, gpointer value, gpointer user_data)
-{
-	int* need_build_again = user_data;
-	ClassIdMappingElement *class_elem = value;  
 
-	if( class_elem->data.layout.slots == CLASS_LAYOUT_NOT_INITIALIZED )
-	{
-		*need_build_again = 1;
-	} 
-}
+static void write_mapping_block (gsize thread_id);
 
-//构建记录的所有类的layout
+//尝试向profiler类注册表里加入指定类
 static void
-build_all_class_id_mapping_element_layout_bitmap()
-{
-	int need_build_again = 1;
-	while( need_build_again )
-	{
-		g_hash_table_foreach(profiler->classes->table, build_class_layout_bitmap_cb, NULL); 
-		need_build_again = 0;
-		g_hash_table_foreach(profiler->classes->table, test_class_layout_ready_cb, &need_build_again); 
+	try_insert_class_id_mapping_element( MonoClass* klass )
+{ 
+	ClassIdMappingElement *element = class_id_mapping_element_get (klass);
+	if (element == NULL) 
+	{ //在类表中未找到当前类
+		element = class_id_mapping_element_new (klass);
+
+	}else{//此处需要验证新加入的类是否与已存在的类相同
+		//若已经在查找表中存在，且重新载入有可能类中的成员有变故需重新
+		//计算类布局
+
+		MonoImage *image = mono_class_get_image (klass);
+		MonoAssembly *assembly = mono_image_get_assembly (image);
+		guint32 assembly_id = loaded_element_get_id (profiler->loaded_assemblies, assembly);
+		//表中类已经过期!
+		if( element->data.assembly_id != assembly_id || 
+			element->data.alive )
+		{
+			//重置名称
+			if( element->name )
+			{
+				g_free( element->name );
+				element->name = NULL;
+			}
+
+			element->name = mono_type_full_name (mono_class_get_type (klass)); 
+			//若类型名为空则使用类名作为类型名
+			if(!strcmp(element->name,""))
+			{ 
+				GString *class_name = NULL;
+				g_free(element->name);
+				element->name = NULL;
+				class_name = g_string_new ("");
+				append_class_name (class_name, klass, TRUE);
+				element->name = g_string_free (class_name, FALSE);
+			}
+			element->data.assembly_id = assembly_id;
+			element->data.bitmap.compact = 0;
+			if( element->data.bitmap.extended )
+			{
+				g_free( element->data.bitmap.extended );
+				element->data.bitmap.extended = 0;
+			}
+			element->data.layout.slots = CLASS_LAYOUT_NOT_INITIALIZED;
+			element->data.layout.references = CLASS_LAYOUT_NOT_INITIALIZED;
+			element->data.alive =1;
+
+			element->next_unwritten = profiler->classes->unwritten;
+			profiler->classes->unwritten = element;
+			element->id = profiler->classes->next_id;
+			profiler->classes->next_id ++;
+			write_mapping_block(0); 
+		}  
 	}
+	 
 }
 
 void mark_all_unload_assembly_class_dead_cb(gpointer key, gpointer value, gpointer user_data)
@@ -1688,6 +1661,7 @@ query_class_id_mapping_element_references_count(MonoClass* klass)
 }
 
 //扫描整个堆，计算所有对象的引用数量加和
+//此过程只访问profiler内部数据
 static int 
 calc_heap_total_references_buf_size(void)
 {
@@ -4641,55 +4615,28 @@ print_event_data (ProfilerPerThreadData *data, ProfilerEventData *event, guint64
 
 static void
 class_start_load (MonoProfiler *profiler, MonoClass *klass) 
-{
-	//ProfilerPerThreadData *data;
-	//ProfilerEventData *event;
-
-	//GET_PROFILER_THREAD_DATA (data);
-	//GET_NEXT_FREE_EVENT (data, event);
-	//STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_LOAD, MONO_PROFILER_EVENT_KIND_START);
-	//COMMIT_RESERVED_EVENTS (data);
+{ 
 }
 static void
 class_end_load (MonoProfiler *profiler, MonoClass *klass, int result) 
-{
-	/*ProfilerPerThreadData *data;
-	ProfilerEventData *event;*/
-
-	//GET_PROFILER_THREAD_DATA (data);
-	//GET_NEXT_FREE_EVENT (data, event);
-	//STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_LOAD | RESULT_TO_EVENT_CODE (result), MONO_PROFILER_EVENT_KIND_END);
-	//COMMIT_RESERVED_EVENTS (data);
-
-	
+{ 
+	//若类没有加载成功忽略此类
+	if( result != MONO_PROFILE_OK )
+		return;
+	 
+	mono_loader_lock();
 	LOCK_PROFILER(); 
 	try_insert_class_id_mapping_element( klass );
 	UNLOCK_PROFILER();
+	mono_loader_unlock();
 }
 static void
 class_start_unload (MonoProfiler *profiler, MonoClass *klass) 
-{
-	/*ProfilerPerThreadData *data;
-	ProfilerEventData *event;*/
-	int i = 0;
-	i++;
-
-	//GET_PROFILER_THREAD_DATA (data);
-	//GET_NEXT_FREE_EVENT (data, event);
-	//STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_UNLOAD, MONO_PROFILER_EVENT_KIND_START);
-	//COMMIT_RESERVED_EVENTS (data);
+{ 
 }
 static void
 class_end_unload (MonoProfiler *profiler, MonoClass *klass) 
-{
-	ProfilerPerThreadData *data;
-	ProfilerEventData *event;
-	int i = 3;
-	i = 4;
-	//GET_PROFILER_THREAD_DATA (data);
-	//GET_NEXT_FREE_EVENT (data, event);
-	//STORE_EVENT_ITEM_COUNTER (event, profiler, klass, MONO_PROFILER_EVENT_DATA_TYPE_CLASS, MONO_PROFILER_EVENT_CLASS_UNLOAD, MONO_PROFILER_EVENT_KIND_END);
-	//COMMIT_RESERVED_EVENTS (data); 
+{ 
 }
 
 static void
@@ -4829,9 +4776,50 @@ static void profiler_heap_add_object (ProfilerHeapShotHeapBuffers *heap, MonoObj
 static void
 object_allocated (MonoProfiler *profiler, MonoObject *obj, MonoClass *klass) 
 {
-	LOCK_PROFILER(); 
+
+	ClassIdMappingElement* class_id = NULL; 
+	mono_loader_lock();
+	LOCK_PROFILER();
+
+	//对象分配，说明对应类已经初始化完毕
+	class_id = class_id_mapping_element_get(klass);
+	g_assert( class_id != NULL );
+
+	if( class_id->data.alive )
+	{
+		g_assert( klass->inited );
+		if( class_id->data.layout.slots == CLASS_LAYOUT_NOT_INITIALIZED )
+		{
+			class_id_mapping_element_build_layout_bitmap( klass , class_id ); 
+			class_id_mapping_element_build_refs( class_id);	
+		}
+
+	} 
+
+	//若类为数组类型
+	if( mono_class_get_rank(klass) )
+	{
+		MonoClass* element_class = mono_class_get_element_class(klass);
+		g_assert( element_class != NULL );
+		g_assert( element_class->inited );
+		if( mono_class_is_valuetype(element_class) )
+		{
+			ClassIdMappingElement* elem_class_id = class_id_mapping_element_get( element_class );
+			g_assert( elem_class_id != NULL );
+		
+			if( elem_class_id->data.layout.slots == CLASS_LAYOUT_NOT_INITIALIZED )
+			{
+				class_id_mapping_element_build_layout_bitmap( element_class , elem_class_id );
+				class_id_mapping_element_build_refs(elem_class_id );
+			} 
+		}
+	}
+
+	//将对象放入记录中
 	profiler_heap_add_object( &(profiler->heap) , obj );  
-	UNLOCK_PROFILER(); 
+	 
+	UNLOCK_PROFILER();
+	mono_loader_unlock();
 	//ProfilerPerThreadData *data;
 	//ProfilerEventData *events;
 	//int unsaved_frames;
@@ -5254,8 +5242,7 @@ record_object_references( ProfilerHeapObjectInfo* obj_info)
 				reference_counter += record_object_field_references(array_element_address, element_id);
 			}
 		}
-	}
-	else { 
+	} else { //若为对象类型
 		if (class_id->data.layout.references > 0)
 		{
 			reference_counter += record_object_field_references((gpointer)(((char*)obj) + sizeof (MonoObject)), class_id);
@@ -5459,17 +5446,15 @@ process_gc_event (MonoProfiler *profiler, gboolean do_heap_profiling, MonoGCEven
 	static gboolean dump_heap_data;
 	
 	int total_refs_capacity = 0;
+	float refs_factor = 1.5f;
 
 	switch (ev) {
 	case MONO_GC_EVENT_PRE_STOP_WORLD:
 		//此时所有托管线程尚未停止
-		LOCK_PROFILER();
-		//构建所有class_id_mapping_element的对象布局
-		build_all_class_id_mapping_element_layout_bitmap();
+		LOCK_PROFILER(); 
 		//计算堆中所有对象的引用总数
-		total_refs_capacity = calc_heap_total_references_buf_size();
-
-		
+		total_refs_capacity = calc_heap_total_references_buf_size(); 
+		total_refs_capacity = (int)(refs_factor*((float)total_refs_capacity)); 
 		//确保对象引用缓冲区大小满足
 		ensure_references_buf_capacity(total_refs_capacity);
 		clear_references_buf();
