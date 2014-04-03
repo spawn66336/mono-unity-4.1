@@ -1857,8 +1857,7 @@ class_id_mapping_element_destroy (gpointer element) {
 
 static void 
 heap_object_info_element_destroy(gpointer element )
-{
-	g_free(element);
+{ 
 }
 
 //创建函数映射表
@@ -1979,7 +1978,8 @@ class_info_destroy( gpointer element )
 {
 	ProfilerClassInfo* classinfo = (ProfilerClassInfo*)element;
 	g_free( classinfo->name );
-	if( classinfo->bitmap.extended )
+
+	if( classinfo->layout.slots >  CLASS_LAYOUT_PACKED_BITMAP_SIZE)
 	{
 		g_free(classinfo->bitmap.extended);
 		classinfo->bitmap.extended = 0;
