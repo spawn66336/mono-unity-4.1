@@ -6233,49 +6233,54 @@ failure_handling:
 		profiler->action_flags.report_gc_events = TRUE;
 	}
 
-	
-	if (profiler->file_name == NULL) {
-		char *program_name = g_get_prgname ();
-		
-		if (program_name != NULL) {
-			char *name_buffer = g_strdup (program_name);
-			char *name_start = name_buffer;
-			char *cursor;
-			
-			/* Jump over the last '/' */
-			cursor = strrchr (name_buffer, '/');
-			if (cursor == NULL) {
-				cursor = name_buffer;
-			} else {
-				cursor ++;
-			}
-			name_start = cursor;
-			
-			/* Then jump over the last '\\' */
-			cursor = strrchr (name_start, '\\');
-			if (cursor == NULL) {
-				cursor = name_start;
-			} else {
-				cursor ++;
-			}
-			name_start = cursor;
-			
-			/* Finally, find the last '.' */
-			cursor = strrchr (name_start, '.');
-			if (cursor != NULL) {
-				*cursor = 0;
-			}
-			
-			if (profiler->file_name_suffix == NULL) {
-				profiler->file_name = g_strdup_printf ("%s.mprof", name_start);
-			} else {
-				profiler->file_name = g_strdup_printf ("%s-%s.mprof", name_start, profiler->file_name_suffix);
-			}
-			g_free (name_buffer);
-		} else {
-			profiler->file_name = g_strdup_printf ("%s.mprof", "profiler-log");
-		}
+	{//以当前系统时间为文件名
+		SYSTEMTIME systime;
+		GetLocalTime( &systime );
+		profiler->file_name = g_strdup_printf ("HeapShot_%d-%d-%d_%d-%d-%d-%d.mprof", 
+			systime.wYear , systime.wMonth , systime.wDay , systime.wHour , systime.wMinute , systime.wSecond , systime.wMilliseconds);
 	}
+	
+	//if (profiler->file_name == NULL) {
+	//	char *program_name = g_get_prgname ();
+	//	
+	//	if (program_name != NULL) {
+	//		char *name_buffer = g_strdup (program_name);
+	//		char *name_start = name_buffer;
+	//		char *cursor;
+	//		
+	//		/* Jump over the last '/' */
+	//		cursor = strrchr (name_buffer, '/');
+	//		if (cursor == NULL) {
+	//			cursor = name_buffer;
+	//		} else {
+	//			cursor ++;
+	//		}
+	//		name_start = cursor;
+	//		
+	//		/* Then jump over the last '\\' */
+	//		cursor = strrchr (name_start, '\\');
+	//		if (cursor == NULL) {
+	//			cursor = name_start;
+	//		} else {
+	//			cursor ++;
+	//		}
+	//		name_start = cursor;
+	//		
+	//		/* Finally, find the last '.' */
+	//		cursor = strrchr (name_start, '.');
+	//		if (cursor != NULL) {
+	//			*cursor = 0;
+	//		} 
+	//		if (profiler->file_name_suffix == NULL) {
+	//			profiler->file_name = g_strdup_printf ("%s.mprof", name_start);
+	//		} else {
+	//			profiler->file_name = g_strdup_printf ("%s-%s.mprof", name_start, profiler->file_name_suffix);
+	//		}
+	//		g_free (name_buffer);
+	//	} else {
+	//		profiler->file_name = g_strdup_printf ("%s.mprof", "profiler-log");
+	//	}
+	//}
 }
 //end of setup_user_options
 
