@@ -888,11 +888,30 @@ static guint32 logging_profiler_thread_id = -1;
 		Profiler日志文件操作宏
 ===================================
 */
-#define FILE_HANDLE_TYPE FILE*
-#define OPEN_FILE() profiler->file = fopen (profiler->file_name, "wb");
-#define WRITE_BUFFER(b,s) fwrite ((b), 1, (s), profiler->file)
-#define FLUSH_FILE() fflush (profiler->file)
-#define CLOSE_FILE() fclose (profiler->file);
+//#define FILE_HANDLE_TYPE FILE*
+#define FILE_HANDLE_TYPE HANDLE
+//#define OPEN_FILE() profiler->file = fopen (profiler->file_name, "wb");
+//#define OPEN_FILE() profiler->file = fopen (profiler->file_name, "ab");
+//#define WRITE_BUFFER(b,s) fwrite ((b), 1, (s), profiler->file)
+//#define FLUSH_FILE() fflush (profiler->file)
+//#define CLOSE_FILE() fclose (profiler->file);
+ 
+#define OPEN_FILE() {\
+	LARGE_INTEGER new_file_ptr;\
+	LARGE_INTEGER dist_to_mov = {0};\
+	profiler->file = \
+	CreateFileA( profiler->file_name ,\
+	GENERIC_READ | GENERIC_WRITE , \
+	FILE_SHARE_READ , NULL , OPEN_ALWAYS ,FILE_ATTRIBUTE_NORMAL  , NULL);\
+	if( profiler->file != INVALID_HANDLE_VALUE) SetFilePointerEx( profiler->file , dist_to_mov , &new_file_ptr , FILE_END );\
+	}
+#define WRITE_BUFFER(b,s)\
+	if( profiler->file != INVALID_HANDLE_VALUE)  {\
+	DWORD bytes2w = 0;\
+	WriteFile( profiler->file , b , s , &bytes2w , NULL );}
+#define FLUSH_FILE() FlushFileBuffers(profiler->file)
+#define CLOSE_FILE() CloseHandle(profiler->file)
+
 /*
 =====================================
 */
@@ -2658,7 +2677,7 @@ write_current_block (guint16 code) {
 	header [8] = (counter_delta >> 16) & 0xff;
 	header [9] = (counter_delta >> 24) & 0xff;
 	
-
+	OPEN_FILE(); 
 	WRITE_BUFFER (& (header [0]), 10); 
 	while ((current_buffer != NULL) && (profiler->full_write_buffers > 0)) {
 
@@ -2670,8 +2689,9 @@ write_current_block (guint16 code) {
 
 		WRITE_BUFFER (& (current_buffer->buffer [0]), profiler->current_write_position);
 	}
-	FLUSH_FILE ();
-
+	FLUSH_FILE (); 
+	//关闭文件以便在截取快照过程中便于用户打开查看
+	CLOSE_FILE();
 	profiler->current_write_buffer = profiler->write_buffers;
 	profiler->current_write_position = 0;
 	profiler->full_write_buffers = 0;
@@ -6235,8 +6255,10 @@ failure_handling:
 
 	{//以当前系统时间为文件名
 		SYSTEMTIME systime;
+		char heapshot_file_dir[2048] = {0};
 		GetLocalTime( &systime );
-		profiler->file_name = g_strdup_printf ("HeapShot_%d-%d-%d_%d-%d-%d-%d.mprof", 
+		GetCurrentDirectoryA( sizeof(heapshot_file_dir) , heapshot_file_dir );
+		profiler->file_name = g_strdup_printf ("%s\\HeapShot_%d-%d-%d_%d-%d-%d-%d.mprof", heapshot_file_dir ,
 			systime.wYear , systime.wMonth , systime.wDay , systime.wHour , systime.wMinute , systime.wSecond , systime.wMilliseconds);
 	}
 	
@@ -6428,8 +6450,10 @@ mono_profiler_startup (const char *desc)
 
 	//分配tls槽位
 	ALLOCATE_PROFILER_THREAD_DATA ();
+
 	OPEN_FILE ();
-	
+	CLOSE_FILE();
+
 	write_intro_block ();
 	write_directives_block (TRUE);
 	
