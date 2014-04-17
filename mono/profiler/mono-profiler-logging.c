@@ -5418,7 +5418,19 @@ profiler_heap_report_object_unreachable(ProfilerHeapShotWriteJob *job, ProfilerH
 static void
 profiler_heap_add_object (ProfilerHeapShotHeapBuffers *heap, MonoObject *obj , ClassIdMappingElement* class_elem ) 
 { 
-	LoadedElement *appdomain_elem = NULL;
+	LoadedElement *appdomain_elem = NULL; 
+	g_hash_table_insert( profiler->heap_objs_tab , obj , obj );
+
+	//初始化对象信息
+	heap->first_free_slot->obj = obj;
+	heap->first_free_slot->klass = obj->vtable->klass;
+	heap->first_free_slot->class_id = class_elem->id;
+	heap->first_free_slot->size = mono_object_get_size(obj);
+	heap->first_free_slot->domain = obj->vtable->domain ;
+	heap->first_free_slot->ref_start_indx = 0;
+	heap->first_free_slot->refs_count = 0;
+	heap->first_free_slot ++;
+
 	//最后一个槽位不使用
 	if (heap->first_free_slot >= heap->current->end_slot) 
 	{
@@ -5437,18 +5449,6 @@ profiler_heap_add_object (ProfilerHeapShotHeapBuffers *heap, MonoObject *obj , C
 		}
 		heap->first_free_slot = &(heap->current->buffer [0]);
 	} 
-
-	g_hash_table_insert( profiler->heap_objs_tab , obj , obj );
-
-	//初始化对象信息
-	heap->first_free_slot->obj = obj;
-	heap->first_free_slot->klass = obj->vtable->klass;
-	heap->first_free_slot->class_id = class_elem->id;
-	heap->first_free_slot->size = mono_object_get_size(obj);
-	heap->first_free_slot->domain = obj->vtable->domain ;
-	heap->first_free_slot->ref_start_indx = 0;
-	heap->first_free_slot->refs_count = 0;
-	heap->first_free_slot ++;
 }
 
 //此函数从对象链表队尾弹出已死亡的对象，若发现在current_slot前还有存活对象
@@ -5918,8 +5918,7 @@ profiler_shutdown (MonoProfiler *prof)
 	MONO_PROFILER_GET_CURRENT_TIME (profiler->end_time);
 	MONO_PROFILER_GET_CURRENT_COUNTER (profiler->end_counter);
 	write_end_block ();
-	FLUSH_FILE ();
-	CLOSE_FILE();
+ 
 	mono_profiler_install_code_chunk_new (NULL);
 	mono_profiler_install_code_chunk_destroy (NULL);
 	mono_profiler_install_code_buffer_new (NULL);
